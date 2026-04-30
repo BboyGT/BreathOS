@@ -5,7 +5,7 @@ BreatheOS is a breathing and cardiovascular wellness app I built to make breath 
 It combines guided breathing sessions, blood pressure logs, sleep sounds, session history, and a real-time "Breathe Together" room feature.
 
 Built by **Godstime Aburu**
-GitHub: [BBoyGT](https://github.com/BBoyGT)
+GitHub: [BboyGT](https://github.com/BboyGT)
 
 ---
 
@@ -29,16 +29,6 @@ This is not a medical device and it is not medical advice. It is a wellness tool
 ## About The Sounds
 
 The sleep sounds in this project are generated with the **Web Audio API**. That means the app creates ambient sounds like rain, water, wind, fire, and atmosphere in the browser instead of shipping downloaded audio files.
-
-About using YouTube sounds:
-
-- Do not download and use random YouTube sounds unless you own them or have permission.
-- Even if a sound is on YouTube, it is usually still copyrighted.
-- If you want real audio files later, use royalty-free or properly licensed sources.
-- Good options are YouTube Audio Library, Pixabay, Freesound, or your own recordings.
-- Always check whether attribution is required.
-
-For now, the safest path is keeping the procedural Web Audio sounds already in the project.
 
 ---
 
@@ -79,7 +69,7 @@ For now, the safest path is keeping the procedural Web Audio sounds already in t
 Clone the project:
 
 ```bash
-git clone https://github.com/BBoyGT/BreathOS.git
+git clone https://github.com/BboyGT/BreathOS.git
 cd BreathOS
 ```
 
@@ -253,6 +243,6 @@ If real sound files are added later, they should only come from sources that all
 ## Author
 
 Built by **Godstime Aburu**
-GitHub: [BBoyGT](https://github.com/BBoyGT)
+GitHub: [BboyGT](https://github.com/BboyGT)
 
 I built this as a personal wellness project around breathing, focus, and cardiovascular habit tracking.
