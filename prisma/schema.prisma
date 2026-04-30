@@ -1,0 +1,117 @@
+// BreatheOS — Prisma Schema
+// Run: npx prisma db push (or bun run db:push)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ─── NextAuth required tables ─────────────────────────────────────
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String?   @unique
+  emailVerified DateTime?
+  image         String?
+  accounts      Account[]
+  sessions      Session[]
+
+  // BreatheOS profile
+  profile       UserProfile?
+  bpLogs        BpLog[]
+  breathSessions BreathSession[]
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ─── BreatheOS custom tables ──────────────────────────────────────
+
+model UserProfile {
+  id                       String  @id @default(cuid())
+  userId                   String  @unique
+  user                     User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Health profile
+  age                      String?
+  gender                   String?
+  weight                   String?
+  systolic                 String?
+  diastolic                String?
+
+  // Training config
+  goal                     String  @default("bp")
+  trainingDay              Int     @default(1)
+  soundOn                  Boolean @default(true)
+  sessionSoundIds          String  @default("[]")
+  sessionSoundAutoRotate   Boolean @default(true)
+  countCadenceMultiplier   Float   @default(1.25)
+  sleepDuration            Int     @default(0)
+  sleepVolume              Float   @default(0.7)
+  sleepSoundIds            String  @default("[]")
+  remindersOn              Boolean @default(false)
+  safetyConsentAccepted    Boolean @default(false)
+  guardianConsentAcknowledged Boolean @default(false)
+
+  updatedAt                DateTime @updatedAt
+}
+
+model BpLog {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  date      String
+  systolic  Int
+  diastolic Int
+  day       Int
+  createdAt DateTime @default(now())
+}
+
+model BreathSession {
+  id               String   @id @default(cuid())
+  userId           String
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  date             String
+  status           String   // "complete" | "partial" | "missed"
+  cyclesCompleted  Int
+  totalCycles      Int
+  elapsed          Int      // seconds
+  trainingDay      Int
+  createdAt        DateTime @default(now())
+}
