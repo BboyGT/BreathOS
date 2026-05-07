@@ -48,8 +48,8 @@ model User {
   sessions      Session[]
 
   // BreatheOS profile
-  profile       UserProfile?
-  bpLogs        BpLog[]
+  profile        UserProfile?
+  bpLogs         BpLog[]
   breathSessions BreathSession[]
 }
 
@@ -64,32 +64,48 @@ model VerificationToken {
 // ─── BreatheOS custom tables ──────────────────────────────────────
 
 model UserProfile {
-  id                       String  @id @default(cuid())
-  userId                   String  @unique
-  user                     User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id                          String   @id @default(cuid())
+  userId                      String   @unique
+  user                        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   // Health profile
-  age                      String?
-  gender                   String?
-  weight                   String?
-  systolic                 String?
-  diastolic                String?
+  age                         String?
+  gender                      String?
+  weight                      String?
+  systolic                    String?
+  diastolic                   String?
 
   // Training config
-  goal                     String  @default("bp")
-  trainingDay              Int     @default(1)
-  soundOn                  Boolean @default(true)
-  sessionSoundIds          String  @default("[]")
-  sessionSoundAutoRotate   Boolean @default(true)
-  countCadenceMultiplier   Float   @default(1.25)
-  sleepDuration            Int     @default(0)
-  sleepVolume              Float   @default(0.7)
-  sleepSoundIds            String  @default("[]")
-  remindersOn              Boolean @default(false)
-  safetyConsentAccepted    Boolean @default(false)
-  guardianConsentAcknowledged Boolean @default(false)
+  goal                        String   @default("bp")
+  trainingDay                 Int      @default(1)
+  soundOn                     Boolean  @default(true)
+  sessionSoundIds             String   @default("[]")
+  sessionSoundAutoRotate      Boolean  @default(true)
+  countCadenceMultiplier      Float    @default(1.25)
+  sleepDuration               Int      @default(0)
+  sleepVolume                 Float    @default(0.7)
+  sleepSoundIds               String   @default("[]")
+  remindersOn                 Boolean  @default(false)
+  safetyConsentAccepted       Boolean  @default(false)
+  guardianConsentAcknowledged Boolean  @default(false)
 
-  updatedAt                DateTime @updatedAt
+  // Premium features
+  hapticsOn                   Boolean  @default(false)
+  voiceOn                     Boolean  @default(false)
+  voiceRate                   Float    @default(1.0)
+  streakCount                 Int      @default(0)
+  longestStreak               Int      @default(0)
+  lastStreakDate              String   @default("")
+  customPhases                String   @default("")
+  profileName                 String   @default("Default")
+
+  // ── Subscription ─────────────────────────────────────────────
+  subscriptionTier            String   @default("free")
+  subscriptionExpiry          String   @default("")
+  paystackRef                 String   @default("")
+  paystackCustomerId          String   @default("")
+
+  updatedAt                   DateTime @updatedAt
 }
 
 model BpLog {
@@ -104,14 +120,14 @@ model BpLog {
 }
 
 model BreathSession {
-  id               String   @id @default(cuid())
-  userId           String
-  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  date             String
-  status           String   // "complete" | "partial" | "missed"
-  cyclesCompleted  Int
-  totalCycles      Int
-  elapsed          Int      // seconds
-  trainingDay      Int
-  createdAt        DateTime @default(now())
+  id              String   @id @default(cuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  date            String
+  status          String
+  cyclesCompleted Int
+  totalCycles     Int
+  elapsed         Int
+  trainingDay     Int
+  createdAt       DateTime @default(now())
 }

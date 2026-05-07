@@ -11,7 +11,6 @@ import { Command } from "cmdk";
 import { createNatureSound, SOUND_PRESETS } from "./nature-sound";
 import BpChart from "./bp-chart";
 import CreatorSignature from "@/components/CreatorSignature";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 // AlertDialog imports removed — exit session now uses a custom AnimatePresence modal
 import { Switch } from "@/components/ui/switch";
 import { Progress } from "@/components/ui/progress";
@@ -35,6 +34,50 @@ interface Recommendation { minutes: number; sessionsPerDay: number; bp: string; 
 interface Profile { age: string; gender: string; weight: string; systolic: string; diastolic: string; }
 interface HistoryEntry { status: string; cyclesCompleted: number; totalCycles: number; }
 interface SessionSummary { status: "complete"|"partial"|"missed"; cyclesCompleted: number; totalCycles: number; elapsed: number; trainingDay: number; }
+interface PremiumSettings {
+  hapticsOn: boolean;
+  voiceOn: boolean;
+  voiceRate: number;
+  customPhases: PhaseSet | null;
+  profileName: string;
+  subscriptionTier: string;
+  subscriptionExpiry: string;
+}
+interface PremiumPackage {
+  id: string;
+  name: string;
+  price: string;
+  amountKobo: number;
+  tagline: string;
+  unlocks: string[];
+  level: number;
+  highlight?: boolean;
+}
+interface UploadedSound {
+  id: string;
+  name: string;
+  emoji: string;
+  category: string;
+  url: string;
+  fileName: string;
+}
+interface SavedSoundMix {
+  id: string;
+  name: string;
+  sessionSoundIds: string[];
+  sleepSoundIds: string[];
+}
+interface SavedRoutine {
+  id: string;
+  name: string;
+  phases: PhaseSet;
+}
+interface TrainingProfile {
+  id: string;
+  name: string;
+  profile: Profile;
+  goal: string;
+}
 interface PersistedBreatheState {
   profile: Profile; goal: string; rec: Recommendation | null; nature: string; soundOn: boolean;
   sessionSelectedSoundIds: string[]; sessionSoundAutoRotate: boolean; trainingDay: number;
@@ -42,6 +85,10 @@ interface PersistedBreatheState {
   sleepDuration: number; sleepVolume: number; sleepSelectedSoundIds: string[];
   countCadenceMultiplier: number; safetyConsentAccepted: boolean; guardianConsentAcknowledged: boolean;
   remindersOn: boolean;
+  premium: PremiumSettings;
+  savedSoundMixes: SavedSoundMix[];
+  savedRoutines: SavedRoutine[];
+  trainingProfiles: TrainingProfile[];
 }
 
 // ─── Together peer ─────────────────────────────────────────────────
@@ -50,6 +97,63 @@ interface Peer { userId: string; phase: string; count: number; }
 const STORAGE_KEY = "breatheos:v2";
 const CONFIGURED_WS_URL = process.env.NEXT_PUBLIC_WS_URL;
 const CROSSFADE_SECONDS = 15;
+const FREE_SESSION_SOUND_LIMIT = 2;
+const DEFAULT_PREMIUM_SETTINGS: PremiumSettings = {
+  hapticsOn: false,
+  voiceOn: false,
+  voiceRate: 1,
+  customPhases: null,
+  profileName: "Default",
+  subscriptionTier: "free",
+  subscriptionExpiry: "",
+};
+const PREMIUM_PACKAGES: PremiumPackage[] = [
+  {
+    id: "premium_calm",
+    name: "Calm Pack",
+    price: "₦2,500/mo",
+    amountKobo: 250000,
+    tagline: "Better sound control and imported audio.",
+    unlocks: ["unlimitedSounds", "uploadedSounds", "savedSoundMixes", "soundControls"],
+    level: 1,
+  },
+  {
+    id: "premium_coach",
+    name: "Coach Pack",
+    price: "₦4,500/mo",
+    amountKobo: 450000,
+    tagline: "Everything in Calm, plus guided coaching tools.",
+    unlocks: ["unlimitedSounds", "uploadedSounds", "savedSoundMixes", "soundControls", "voiceCues", "haptics", "customPhases", "sessionFeedback", "togetherGuidance"],
+    level: 2,
+    highlight: true,
+  },
+  {
+    id: "premium_studio",
+    name: "Studio Pack",
+    price: "₦7,500/mo",
+    amountKobo: 750000,
+    tagline: "Everything in Coach, plus deeper profile and streak tools.",
+    unlocks: ["unlimitedSounds", "uploadedSounds", "savedSoundMixes", "soundControls", "voiceCues", "haptics", "customPhases", "sessionFeedback", "togetherGuidance", "streakStats", "profileName", "advancedExport", "savedRoutines", "sharedRoutines", "trainingProfiles"],
+    level: 3,
+  },
+];
+const PREMIUM_FEATURES = [
+  { id:"unlimitedSounds", name:"Unlimited Session Mixes", detail:"Add more than two session sounds and auto-rotate them." },
+  { id:"uploadedSounds", name:"Imported Sound Library", detail:"Use downloaded audio files instead of generated soundscapes." },
+  { id:"savedSoundMixes", name:"Saved Sound Mixes", detail:"Save and reuse favorite session and sleep sound combinations." },
+  { id:"soundControls", name:"More Sound Controls", detail:"Keep preferred sleep/session audio setups separate." },
+  { id:"voiceCues", name:"Voice Guidance", detail:"Hear calm phase cues during every breath cycle." },
+  { id:"haptics", name:"Haptic Cues", detail:"Feel phase changes on supported mobile devices." },
+  { id:"customPhases", name:"Custom Breathing Timing", detail:"Create your own inhale, hold, exhale, and empty-hold pattern." },
+  { id:"sessionFeedback", name:"Coaching Feedback", detail:"Get a short session readout with completion and consistency guidance." },
+  { id:"togetherGuidance", name:"Shared Session Coaching", detail:"Use voice and haptic cues while breathing in a room." },
+  { id:"streakStats", name:"Deeper Streak Stats", detail:"See current and best streaks as premium coaching stats." },
+  { id:"profileName", name:"Named Training Profile", detail:"Save a named profile for your plan and export." },
+  { id:"advancedExport", name:"Advanced Export", detail:"Export premium stats, package status, routines, and saved mixes." },
+  { id:"savedRoutines", name:"Saved Custom Routines", detail:"Save multiple custom phase patterns and switch between them." },
+  { id:"sharedRoutines", name:"Shared Saved Routines", detail:"Apply saved Studio routines before starting a Breathe Together session." },
+  { id:"trainingProfiles", name:"Multiple Training Profiles", detail:"Save and restore multiple health/goal profiles." },
+];
 
 // ─── Programs ─────────────────────────────────────────────────────
 const PROGRAMS: Program[] = [
@@ -101,7 +205,8 @@ function getRecommendation({ age, gender, weight, systolic, diastolic }: Profile
   const d = diastolic ? parseInt(diastolic) : 0;
   const a = age ? parseInt(age) : 30;
   const w = weight ? parseFloat(weight) : 0;
-  let minutes = 10, sessionsPerDay = 2, notes: string[] = [];
+  let minutes = 10, sessionsPerDay = 2;
+  const notes: string[] = [];
   const hasBp = s > 0 && d > 0;
   const bp = !hasBp ? "normal" : s < 120 && d < 80 ? "normal" : s < 130 && d < 80 ? "elevated" : s < 140 || d < 90 ? "high1" : "high2";
   if (goal === "lung") {
@@ -194,7 +299,7 @@ interface BottomNavProps {
   setScreen: (s: string) => void;
 }
 function BottomNav({ screen, sleepPlaying, stopSleepSounds, setScreen }: BottomNavProps) {
-  const NAV = [["dashboard","🏠","Home"],["sleep","😴","Sleep"],["calendar","📅","History"],["bp","📊","BP"],["setup","⚙️","Profile"]] as const;
+  const NAV = [["dashboard","⌂","Home"],["sleep","☾","Sleep"],["premium","◆","Premium"],["calendar","□","History"],["bp","▥","BP"],["setup","⚙","Profile"]] as const;
   return (
     // FIX 4: constrain the nav to the 520px content column by centering with
     // left:50%/translateX(-50%) instead of left:0/right:0. This prevents the
@@ -206,8 +311,8 @@ function BottomNav({ screen, sleepPlaying, stopSleepSounds, setScreen }: BottomN
         return (
           <button key={s} onClick={() => { if (sleepPlaying && s !== "sleep") stopSleepSounds(); setScreen(s); }}
             style={{ background:"none", border:"none", cursor:"pointer", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:2, flex:1, padding:"4px 2px", minWidth:0 }}>
-            <span style={{ fontSize:18, lineHeight:1, filter: active ? "drop-shadow(0 0 5px rgba(127,255,212,0.8))" : "none", transition:"filter 0.2s" }}>{icon}</span>
-            <span style={{ fontFamily:"'Cormorant Garamond',serif", fontSize:9, letterSpacing:1, color: active ? "#7fffd4" : "rgba(232,244,240,0.3)", textTransform:"uppercase", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis", maxWidth:52, transition:"color 0.2s" }}>{label}</span>
+            <span style={{ fontSize:17, lineHeight:1, filter: active ? "drop-shadow(0 0 5px rgba(127,255,212,0.8))" : "none", transition:"filter 0.2s" }}>{icon}</span>
+            <span style={{ fontFamily:"'Cormorant Garamond',serif", fontSize:8, letterSpacing:0.6, color: active ? "#7fffd4" : "rgba(232,244,240,0.3)", textTransform:"uppercase", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis", maxWidth:48, transition:"color 0.2s" }}>{label}</span>
           </button>
         );
       })}
@@ -217,7 +322,7 @@ function BottomNav({ screen, sleepPlaying, stopSleepSounds, setScreen }: BottomN
 // ─── SidebarNav (desktop ≥1200px) ───────────────────────────────────
 interface SidebarNavProps { screen: string; sleepPlaying: boolean; stopSleepSounds: () => void; setScreen: (s: string) => void; trainingDay: number; history: Record<string, HistoryEntry>; rec: Recommendation | null; }
 function SidebarNav({ screen, sleepPlaying, stopSleepSounds, setScreen, trainingDay, history, rec }: SidebarNavProps) {
-  const NAV = [["dashboard","Home","⌂"],["sleep","Sleep","🌙"],["calendar","History","📅"],["bp","BP Tracker","📊"],["setup","Profile","⚙️"]] as const;
+  const NAV = [["dashboard","Home","⌂"],["sleep","Sleep","🌙"],["premium","Premium","◆"],["calendar","History","📅"],["bp","BP Tracker","📊"],["setup","Profile","⚙️"]] as const;
   // Today’s session status
   const todayKey = today();
   const todayEntry = history[todayKey];
@@ -314,7 +419,10 @@ export default function BreatheOS() {
   const [introStep, setIntroStep] = useState(0);
   const [postIntroScreen, setPostIntroScreen] = useState("welcome");
   const [hydrated, setHydrated] = useState(false);
+  const [accountHydrated, setAccountHydrated] = useState(false);
   const [isDesktop, setIsDesktop] = useState(false);
+  const accountHydrateKeyRef = useRef("");
+  const accountHydrateRequestRef = useRef(0);
 
   // Responsive layout detection
   useEffect(() => {
@@ -338,7 +446,6 @@ export default function BreatheOS() {
   const [soundOn, setSoundOn] = useState(true);
    const [sessionSelectedSoundIds, setSessionSelectedSoundIds] = useState<string[]>(["Ocean Waves"]);
    const [sessionSoundAutoRotate, setSessionSoundAutoRotate] = useState(true);
-   const [setupSoundCategory, setSetupSoundCategory] = useState("All");
    const [trainingDay, setTrainingDay] = useState(1);
 
   // Session state
@@ -347,9 +454,7 @@ export default function BreatheOS() {
   const [cycleNum, setCycleNum] = useState(0);
   const [totalCycles, setTotalCycles] = useState(0);
   const [elapsed, setElapsed] = useState(0);
-  const elapsedValueRef = useRef(0); // tracks current elapsed without stale closure
    const [sessionStarted, setSessionStarted] = useState(false);
-   const [sessionActive, setSessionActive] = useState(false);
    const [showExitSessionPrompt, setShowExitSessionPrompt] = useState(false);
   const [lastSessionSummary, setLastSessionSummary] = useState<SessionSummary|null>(null);
   const [safetyConsentAccepted, setSafetyConsentAccepted] = useState(false);
@@ -391,6 +496,20 @@ export default function BreatheOS() {
 
   // Settings
   const [countCadenceMultiplier, setCountCadenceMultiplier] = useState(1.25);
+  const [premium, setPremium] = useState<PremiumSettings>(DEFAULT_PREMIUM_SETTINGS);
+  const [customPhaseDraft, setCustomPhaseDraft] = useState({ inhale:"5", holdIn:"2", exhale:"7", holdOut:"0" });
+  const [checkoutPackageId, setCheckoutPackageId] = useState("");
+  const [checkoutEmail, setCheckoutEmail] = useState("");
+  const [checkoutName, setCheckoutName] = useState("");
+  const [checkoutLoading, setCheckoutLoading] = useState(false);
+  const [checkoutError, setCheckoutError] = useState("");
+  const [uploadedSounds, setUploadedSounds] = useState<UploadedSound[]>([]);
+  const [savedSoundMixes, setSavedSoundMixes] = useState<SavedSoundMix[]>([]);
+  const [soundMixName, setSoundMixName] = useState("My Mix");
+  const [savedRoutines, setSavedRoutines] = useState<SavedRoutine[]>([]);
+  const [routineName, setRoutineName] = useState("Custom Routine");
+  const [trainingProfiles, setTrainingProfiles] = useState<TrainingProfile[]>([]);
+  const [trainingProfileName, setTrainingProfileName] = useState("My Profile");
 
   // cmdk sound search
   const [soundSearchOpen, setSoundSearchOpen] = useState(false);
@@ -437,22 +556,19 @@ export default function BreatheOS() {
   // Using the module-level constant directly fixes the ESLint warning.
 
   // ─── Derived memos ────────────────────────────────────────────────
-  const setupSoundCategories = useMemo(() => ["All", ...new Set(SOUND_PRESETS.map(p => p.category))], []);
-  const filteredSetupSounds = useMemo(() =>
-    setupSoundCategory === "All" ? SOUND_PRESETS : SOUND_PRESETS.filter(p => p.category === setupSoundCategory),
-    [setupSoundCategory]);
-  const sessionSelectedSounds = useMemo(() => SOUND_PRESETS.filter(p => sessionSelectedSoundIds.includes(p.id)), [sessionSelectedSoundIds]);
+  const allSoundPresets = useMemo(() => [...SOUND_PRESETS, ...uploadedSounds], [uploadedSounds]);
+  const sessionSelectedSounds = useMemo(() => allSoundPresets.filter(p => sessionSelectedSoundIds.includes(p.id)), [sessionSelectedSoundIds, allSoundPresets]);
   const SLEEP_CATEGORIES = useMemo(() => {
-    const cats = [...new Set(SOUND_PRESETS.map(p => p.category))];
+    const cats = [...new Set(allSoundPresets.map(p => p.category))];
     return cats.map(cat => {
-      const presets = SOUND_PRESETS.filter(p => p.category === cat);
+      const presets = allSoundPresets.filter(p => p.category === cat);
       return { name: cat, emoji: presets[0]?.emoji ?? "", sounds: presets.map(p => p.id) };
     });
-  }, []);
+  }, [allSoundPresets]);
   const DEFAULT_SLEEP_SOUND_IDS = useMemo(() =>
     SOUND_PRESETS.filter(p => ["Rain","Water"].includes(p.category)).map(p => p.id), []);
   const sleepSelectedSounds = useMemo(() => sleepSelectedSoundIds, [sleepSelectedSoundIds]);
-  const sleepSelectedPresets = useMemo(() => SOUND_PRESETS.filter(p => sleepSelectedSoundIds.includes(p.id)), [sleepSelectedSoundIds]);
+  const sleepSelectedPresets = useMemo(() => allSoundPresets.filter(p => sleepSelectedSoundIds.includes(p.id)), [sleepSelectedSoundIds, allSoundPresets]);
   const activeSleepCategories = useMemo(() =>
     SLEEP_CATEGORIES.filter(c => c.sounds.some(id => sleepSelectedSounds.includes(id))).map(c => c.name),
     [SLEEP_CATEGORIES, sleepSelectedSounds]);
@@ -462,10 +578,52 @@ export default function BreatheOS() {
   }, [sleepDuration, sleepSelectedSoundIds.length]);
   const sleepTimeRemaining = sleepDuration > 0 ? Math.max(0, sleepDuration - sleepElapsed) : Math.max(0, 12*60*60 - sleepElapsed);
   const latestBp = bpLog.length > 0 ? bpLog[bpLog.length-1] : null;
+  const authEmail = authSession?.user?.email ?? "";
+  const isPremium = premium.subscriptionTier !== "free" && (!premium.subscriptionExpiry || new Date(premium.subscriptionExpiry) > new Date());
+  const activePremiumPackage = PREMIUM_PACKAGES.find(pkg => pkg.id === premium.subscriptionTier);
+  const hasPremiumFeature = useCallback((featureId: string) => {
+    if (!isPremium) return false;
+    if (premium.subscriptionTier === "premium_yearly" || premium.subscriptionTier === "premium_monthly") return true;
+    const activeLevel = activePremiumPackage?.level ?? 0;
+    return PREMIUM_PACKAGES.some(pkg => pkg.level <= activeLevel && pkg.unlocks.includes(featureId));
+  }, [isPremium, premium.subscriptionTier, activePremiumPackage]);
+  const getFeaturePlanName = useCallback((featureId: string) => (
+    PREMIUM_PACKAGES.find(pkg => pkg.unlocks.includes(featureId))?.name ?? "Premium"
+  ), []);
   const prog = getProgramForDay(trainingDay, goal);
+  const activeProgram = useMemo(() => (
+    hasPremiumFeature("customPhases") && premium.customPhases
+      ? { ...prog, name:"Custom Flow", desc:"Your saved premium timing pattern.", phases:premium.customPhases, altPhases:[], technique:"Custom Breathing" }
+      : prog
+  ), [hasPremiumFeature, premium.customPhases, prog]);
   const pc = PHASE_CONFIG[phase] ?? PHASE_CONFIG.rest;
   const sessionProgress = totalCycles > 0 ? (cycleNum / totalCycles) * 100 : 0;
   const statusColor: Record<string,string> = { complete:"#7fffd4", partial:"#fbbf24", missed:"#f87171", future:"rgba(127,255,212,0.08)" };
+  const streakStats = useMemo(() => {
+    const completed = Object.keys(history).filter(k => history[k]?.status === "complete").sort();
+    const completedSet = new Set(completed);
+    let current = 0;
+    const cursor = new Date();
+    while (completedSet.has(dateKey(cursor))) {
+      current += 1;
+      cursor.setDate(cursor.getDate() - 1);
+    }
+    let longest = 0;
+    let run = 0;
+    let lastDate = "";
+    for (const key of completed) {
+      const previous = lastDate ? new Date(`${lastDate}T00:00:00`) : null;
+      if (previous) {
+        previous.setDate(previous.getDate() + 1);
+        run = dateKey(previous) === key ? run + 1 : 1;
+      } else {
+        run = 1;
+      }
+      longest = Math.max(longest, run);
+      lastDate = key;
+    }
+    return { current, longest, lastDate };
+  }, [history]);
 
   // ─── Persist / hydrate ───────────────────────────────────────────
   useEffect(() => {
@@ -490,6 +648,26 @@ export default function BreatheOS() {
         if (typeof saved.safetyConsentAccepted === "boolean") setSafetyConsentAccepted(saved.safetyConsentAccepted);
         if (typeof saved.guardianConsentAcknowledged === "boolean") setGuardianConsentAcknowledged(saved.guardianConsentAcknowledged);
         if (typeof saved.remindersOn === "boolean") setRemindersOn(saved.remindersOn);
+        if (Array.isArray(saved.savedSoundMixes)) setSavedSoundMixes(saved.savedSoundMixes);
+        if (Array.isArray(saved.savedRoutines)) setSavedRoutines(saved.savedRoutines);
+        if (Array.isArray(saved.trainingProfiles)) setTrainingProfiles(saved.trainingProfiles);
+        if (saved.premium) {
+          const nextPremium = {
+            ...DEFAULT_PREMIUM_SETTINGS,
+            hapticsOn: Boolean(saved.premium.hapticsOn),
+            voiceOn: Boolean(saved.premium.voiceOn),
+            voiceRate: typeof saved.premium.voiceRate === "number" ? saved.premium.voiceRate : 1,
+            customPhases: saved.premium.customPhases ?? null,
+            profileName: saved.premium.profileName || "Default",
+          };
+          setPremium(nextPremium);
+          if (nextPremium.customPhases) setCustomPhaseDraft({
+            inhale: String(nextPremium.customPhases.inhale),
+            holdIn: String(nextPremium.customPhases.holdIn),
+            exhale: String(nextPremium.customPhases.exhale),
+            holdOut: String(nextPremium.customPhases.holdOut),
+          });
+        }
         if (saved.rec) { setRec(saved.rec); setPostIntroScreen("dashboard"); }
       } else { setSleepSelectedSoundIds(DEFAULT_SLEEP_SOUND_IDS); }
     } catch { setSleepSelectedSoundIds(DEFAULT_SLEEP_SOUND_IDS); }
@@ -512,20 +690,135 @@ export default function BreatheOS() {
   // ── Notification permission ───────────────────────────────────────
   useEffect(() => { if ("Notification" in window) setReminderPermission(Notification.permission); }, []);
 
+  useEffect(() => {
+    const userId = authSession?.user?.id ?? "";
+    const hydrateKey = hydrated && userId ? userId : "";
+    if (!hydrateKey) {
+      if (accountHydrateKeyRef.current) accountHydrateKeyRef.current = "";
+      if (accountHydrated) setAccountHydrated(false);
+      return;
+    }
+    if (accountHydrateKeyRef.current === hydrateKey) return;
+    accountHydrateKeyRef.current = hydrateKey;
+    const requestId = accountHydrateRequestRef.current + 1;
+    accountHydrateRequestRef.current = requestId;
+    setAccountHydrated(false);
+    fetch("/api/user")
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (accountHydrateRequestRef.current !== requestId) return;
+        if (!data?.profile) return;
+        const remote = data.profile;
+        const remoteProfile: Profile = {
+          age: remote.age ?? "",
+          gender: remote.gender ?? "male",
+          weight: remote.weight ?? "",
+          systolic: remote.systolic ?? "",
+          diastolic: remote.diastolic ?? "",
+        };
+        setProfile(remoteProfile);
+        Object.entries(remoteProfile).forEach(([k,v]) => setValue(k as keyof SetupForm, v as string));
+        if (remote.goal) setGoal(remote.goal);
+        if (typeof remote.trainingDay === "number") setTrainingDay(remote.trainingDay);
+        if (typeof remote.soundOn === "boolean") setSoundOn(remote.soundOn);
+        if (typeof remote.sessionSoundIds === "string") {
+          try {
+            const ids = JSON.parse(remote.sessionSoundIds);
+            if (Array.isArray(ids) && ids.length > 0) setSessionSelectedSoundIds(ids);
+          } catch {}
+        }
+        if (typeof remote.sessionSoundAutoRotate === "boolean") setSessionSoundAutoRotate(remote.sessionSoundAutoRotate);
+        if (typeof remote.countCadenceMultiplier === "number") setCountCadenceMultiplier(remote.countCadenceMultiplier);
+        if (typeof remote.sleepDuration === "number") setSleepDuration(remote.sleepDuration);
+        if (typeof remote.sleepVolume === "number") setSleepVolume(remote.sleepVolume);
+        if (typeof remote.sleepSoundIds === "string") {
+          try {
+            const ids = JSON.parse(remote.sleepSoundIds);
+            if (Array.isArray(ids) && ids.length > 0) setSleepSelectedSoundIds(ids);
+          } catch {}
+        }
+        if (typeof remote.remindersOn === "boolean") setRemindersOn(remote.remindersOn);
+        if (typeof remote.safetyConsentAccepted === "boolean") setSafetyConsentAccepted(remote.safetyConsentAccepted);
+        if (typeof remote.guardianConsentAcknowledged === "boolean") setGuardianConsentAcknowledged(remote.guardianConsentAcknowledged);
+        let parsedCustomPhases: PhaseSet | null = null;
+        if (typeof remote.customPhases === "string" && remote.customPhases) {
+          try { parsedCustomPhases = JSON.parse(remote.customPhases); } catch {}
+        }
+        setPremium({
+          hapticsOn: Boolean(remote.hapticsOn),
+          voiceOn: Boolean(remote.voiceOn),
+          voiceRate: typeof remote.voiceRate === "number" ? remote.voiceRate : 1,
+          customPhases: parsedCustomPhases,
+          profileName: remote.profileName || "Default",
+          subscriptionTier: remote.subscriptionTier || "free",
+          subscriptionExpiry: remote.subscriptionExpiry || "",
+        });
+        if (parsedCustomPhases) setCustomPhaseDraft({
+          inhale: String(parsedCustomPhases.inhale),
+          holdIn: String(parsedCustomPhases.holdIn),
+          exhale: String(parsedCustomPhases.exhale),
+          holdOut: String(parsedCustomPhases.holdOut),
+        });
+        if (Array.isArray(data.bpLogs) && data.bpLogs.length > 0) setBpLog(data.bpLogs.map((b: { date: string; systolic: number; diastolic: number; day: number }) => ({ date:b.date, s:b.systolic, d:b.diastolic, day:b.day })));
+        if (Array.isArray(data.breathSessions) && data.breathSessions.length > 0) setHistory(Object.fromEntries(data.breathSessions.map((s: { date: string; status: string; cyclesCompleted: number; totalCycles: number }) => [s.date, { status:s.status, cyclesCompleted:s.cyclesCompleted, totalCycles:s.totalCycles }])));
+        const remoteRec = getRecommendation(remoteProfile, remote.goal ?? "bp");
+        setRec(remoteRec);
+        setPostIntroScreen("dashboard");
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (accountHydrateRequestRef.current === requestId) setAccountHydrated(true);
+      });
+  }, [authSession?.user?.id, hydrated, accountHydrated, setValue]);
+
   // ── Server sync when signed in ────────────────────────────────────
   useEffect(() => {
-    if (!authSession?.user?.id || !hydrated) return;
+    if (!authSession?.user?.id || !hydrated || !accountHydrated) return;
     fetch("/api/user", { method: "PUT", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ profile: { goal, trainingDay, soundOn, sessionSoundIds: JSON.stringify(sessionSelectedSoundIds), sessionSoundAutoRotate, countCadenceMultiplier, sleepDuration, sleepVolume, sleepSoundIds: JSON.stringify(sleepSelectedSoundIds), remindersOn, safetyConsentAccepted, guardianConsentAcknowledged, ...profile },
+      body: JSON.stringify({ profile: { goal, trainingDay, soundOn, sessionSoundIds: JSON.stringify(sessionSelectedSoundIds), sessionSoundAutoRotate, countCadenceMultiplier, sleepDuration, sleepVolume, sleepSoundIds: JSON.stringify(sleepSelectedSoundIds), remindersOn, safetyConsentAccepted, guardianConsentAcknowledged, hapticsOn: premium.hapticsOn, voiceOn: premium.voiceOn, voiceRate: premium.voiceRate, streakCount: streakStats.current, longestStreak: streakStats.longest, lastStreakDate: streakStats.lastDate, customPhases: premium.customPhases ? JSON.stringify(premium.customPhases) : "", profileName: premium.profileName, subscriptionTier: premium.subscriptionTier, subscriptionExpiry: premium.subscriptionExpiry, ...profile },
         bpLogs: bpLog.map(b => ({ date: b.date, systolic: b.s, diastolic: b.d, day: b.day })) }) }).catch(() => {});
-   }, [authSession?.user?.id, trainingDay, bpLog.length]);
+   }, [authSession?.user?.id, hydrated, accountHydrated, trainingDay, bpLog, premium, streakStats, goal, soundOn, sessionSelectedSoundIds, sessionSoundAutoRotate, countCadenceMultiplier, sleepDuration, sleepVolume, sleepSelectedSoundIds, remindersOn, safetyConsentAccepted, guardianConsentAcknowledged, profile]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    const params = new URLSearchParams(window.location.search);
+    const reference = params.get("reference") || params.get("trxref") || params.get("paystack_reference");
+    if (!reference) return;
+    const pendingRaw = window.localStorage.getItem("breatheos:pending-premium");
+    let pending: { packageId?: string } = {};
+    try {
+      pending = pendingRaw ? JSON.parse(pendingRaw) as { packageId?: string } : {};
+    } catch {
+      window.localStorage.removeItem("breatheos:pending-premium");
+    }
+    fetch(`/api/paystack/verify?reference=${encodeURIComponent(reference)}`)
+      .then(r => r.json().then(data => ({ ok:r.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok || data.status !== "success") throw new Error(data.error || "Payment was not verified.");
+        const packageId = data.packageId || pending.packageId;
+        if (packageId) {
+          const subscriptionExpiry = data.subscriptionExpiry || "";
+          setPremium(p => ({ ...p, subscriptionTier: packageId, subscriptionExpiry }));
+          setCheckoutPackageId("");
+          setCheckoutError("");
+          setScreen("premium");
+        }
+        window.localStorage.removeItem("breatheos:pending-premium");
+        window.history.replaceState({}, "", window.location.pathname);
+      })
+      .catch(err => {
+        setCheckoutError(err instanceof Error ? err.message : "Payment was not verified.");
+        setScreen("checkout");
+      });
+  }, [hydrated]);
 
   // ── Persist to localStorage ───────────────────────────────────────
   useEffect(() => {
     if (!hydrated) return;
-    const payload: PersistedBreatheState = { profile, goal, rec, nature, soundOn, sessionSelectedSoundIds, sessionSoundAutoRotate, trainingDay, history, bpLog, sleepDuration, sleepVolume, sleepSelectedSoundIds, countCadenceMultiplier, safetyConsentAccepted, guardianConsentAcknowledged, remindersOn };
+    const localPremium = { ...premium, subscriptionTier:"free", subscriptionExpiry:"" };
+    const payload: PersistedBreatheState = { profile, goal, rec, nature, soundOn, sessionSelectedSoundIds, sessionSoundAutoRotate, trainingDay, history, bpLog, sleepDuration, sleepVolume, sleepSelectedSoundIds, countCadenceMultiplier, safetyConsentAccepted, guardianConsentAcknowledged, remindersOn, premium:localPremium, savedSoundMixes, savedRoutines, trainingProfiles };
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
-  }, [hydrated, profile, goal, rec, nature, soundOn, sessionSelectedSoundIds, sessionSoundAutoRotate, trainingDay, history, bpLog, sleepDuration, sleepVolume, sleepSelectedSoundIds, countCadenceMultiplier, safetyConsentAccepted, guardianConsentAcknowledged, remindersOn]);
+  }, [hydrated, profile, goal, rec, nature, soundOn, sessionSelectedSoundIds, sessionSoundAutoRotate, trainingDay, history, bpLog, sleepDuration, sleepVolume, sleepSelectedSoundIds, countCadenceMultiplier, safetyConsentAccepted, guardianConsentAcknowledged, remindersOn, premium, savedSoundMixes, savedRoutines, trainingProfiles]);
 
   // ── Reminders ─────────────────────────────────────────────────────
   const scheduleNextReminder = useCallback(() => {
@@ -565,6 +858,30 @@ export default function BreatheOS() {
     if (soundRef.current) { soundRef.current.stop(); soundRef.current = null; }
   }, []);
 
+  const createPlayableSound = useCallback((ctx: AudioContext, soundId: string): ReturnType<typeof createNatureSound> => {
+    const uploaded = uploadedSounds.find(sound => sound.id === soundId);
+    if (!uploaded) return createNatureSound(ctx, soundId);
+    const master = ctx.createGain();
+    master.gain.value = 0.8;
+    master.connect(ctx.destination);
+    const audio = new Audio(uploaded.url);
+    audio.loop = true;
+    audio.crossOrigin = "anonymous";
+    const source = ctx.createMediaElementSource(audio);
+    source.connect(master);
+    void audio.play().catch(() => {});
+    return {
+      nodes: [source],
+      master,
+      stop: () => {
+        audio.pause();
+        audio.currentTime = 0;
+        source.disconnect();
+        master.disconnect();
+      },
+    };
+  }, [uploadedSounds]);
+
   const playSessionSound = useCallback((soundId: string) => {
     if (!soundOn) return;
     if (!audioCtxRef.current || audioCtxRef.current.state === "closed") {
@@ -573,9 +890,9 @@ export default function BreatheOS() {
     const ctx = audioCtxRef.current;
     if (ctx.state === "suspended") ctx.resume();
     stopSound();
-    soundRef.current = createNatureSound(ctx, soundId);
+    soundRef.current = createPlayableSound(ctx, soundId);
     setNature(soundId);
-  }, [soundOn, stopSound]);
+  }, [soundOn, stopSound, createPlayableSound]);
 
   const startSound = useCallback(() => {
     const sounds = sessionSelectedSoundIds.length > 0 ? sessionSelectedSoundIds : [nature];
@@ -596,13 +913,23 @@ export default function BreatheOS() {
 
   // ── Sleep sound engine ────────────────────────────────────────────
   const stopSleepSounds = useCallback(() => {
-    clearInterval(sleepTimerRef.current!); sleepTimerRef.current = null;
-    clearInterval(sleepSoundTimerRef.current!); sleepSoundTimerRef.current = null;
-    clearInterval(sleepFadeIntervalRef.current!); sleepFadeIntervalRef.current = null;
-    if (sleepCurrentRef.current) { try { sleepCurrentRef.current.sound.stop(); } catch {} sleepCurrentRef.current.gain.disconnect(); sleepCurrentRef.current = null; }
-    if (sleepNextRef.current) { try { sleepNextRef.current.sound.stop(); } catch {} sleepNextRef.current.gain.disconnect(); sleepNextRef.current = null; }
-    if (sleepMasterRef.current) { sleepMasterRef.current.disconnect(); sleepMasterRef.current = null; }
-    if (sleepAudioRef.current && sleepAudioRef.current.state !== "closed") { sleepAudioRef.current.close(); sleepAudioRef.current = null; }
+    if (sleepTimerRef.current) clearInterval(sleepTimerRef.current); sleepTimerRef.current = null;
+    if (sleepSoundTimerRef.current) clearInterval(sleepSoundTimerRef.current); sleepSoundTimerRef.current = null;
+    if (sleepFadeIntervalRef.current) clearInterval(sleepFadeIntervalRef.current); sleepFadeIntervalRef.current = null;
+    const stopLayer = (layer: typeof sleepCurrentRef.current) => {
+      if (!layer) return;
+      try { layer.sound.stop(); } catch {}
+      try { layer.gain.disconnect(); } catch {}
+    };
+    stopLayer(sleepCurrentRef.current); sleepCurrentRef.current = null;
+    stopLayer(sleepNextRef.current); sleepNextRef.current = null;
+    try { sleepMasterRef.current?.disconnect(); } catch {}
+    sleepMasterRef.current = null;
+    const ctx = sleepAudioRef.current;
+    sleepAudioRef.current = null;
+    if (ctx && ctx.state !== "closed") void ctx.close().catch(() => {});
+    sleepQueueRef.current = [];
+    sleepQueueIdxRef.current = 0;
     setSleepPlaying(false); setSleepElapsed(0); setSleepCurrentSound(""); setSleepNextSound(""); setSleepCrossfadeProgress(0);
   }, []);
 
@@ -612,9 +939,9 @@ export default function BreatheOS() {
     const queue = sleepQueueRef.current; if (!queue.length) return;
     const nextIdx = (sleepQueueIdxRef.current + 1) % queue.length;
     const nextName = queue[nextIdx];
-    const nextPreset = SOUND_PRESETS.find(p => p.id === nextName);
+    const nextPreset = allSoundPresets.find(p => p.id === nextName);
     const nextGain = ctx.createGain(); nextGain.gain.value = 0; nextGain.connect(master);
-    const nextSound = createNatureSound(ctx, nextName);
+    const nextSound = createPlayableSound(ctx, nextName);
     nextSound.master.disconnect(); nextSound.master.connect(nextGain);
     sleepNextRef.current = { sound: nextSound, gain: nextGain };
     setSleepNextSound(nextPreset?.name ?? nextName); setSleepCrossfadeProgress(0);
@@ -633,7 +960,7 @@ export default function BreatheOS() {
         setSleepCurrentSound(nextPreset?.name ?? nextName); setSleepNextSound(""); setSleepCrossfadeProgress(0);
       }
     }, 1000);
-  }, [CROSSFADE_SECONDS]);
+  }, [allSoundPresets, createPlayableSound]);
 
   const buildQueue = useCallback(() => {
     const arr = [...sleepSelectedSounds];
@@ -654,9 +981,9 @@ export default function BreatheOS() {
       sleepAudioRef.current = ctx;
       const master = ctx.createGain(); master.gain.value = 0; master.connect(ctx.destination); sleepMasterRef.current = master;
       const queue = buildQueue(); sleepQueueRef.current = queue; sleepQueueIdxRef.current = 0;
-      const firstName = queue[0]; const firstPreset = SOUND_PRESETS.find(p => p.id === firstName);
+      const firstName = queue[0]; const firstPreset = allSoundPresets.find(p => p.id === firstName);
       const firstGain = ctx.createGain(); firstGain.gain.value = 1; firstGain.connect(master);
-      const firstSound = createNatureSound(ctx, firstName); firstSound.master.disconnect(); firstSound.master.connect(firstGain);
+      const firstSound = createPlayableSound(ctx, firstName); firstSound.master.disconnect(); firstSound.master.connect(firstGain);
       sleepCurrentRef.current = { sound: firstSound, gain: firstGain };
       setSleepCurrentSound(firstPreset?.name ?? firstName);
       master.gain.setTargetAtTime(sleepVolume, ctx.currentTime, 1.5);
@@ -678,7 +1005,7 @@ export default function BreatheOS() {
       stopSleepSounds();
       setSleepError(err instanceof Error ? `Could not start sleep sounds: ${err.message}` : "Could not start sleep sounds on this device.");
     }
-  }, [sleepSelectedSounds, sleepDuration, sleepVolume, stopSleepSounds, buildQueue, crossfadeToNext, sleepSoundDurationSec]);
+  }, [sleepSelectedSounds, sleepDuration, sleepVolume, stopSleepSounds, buildQueue, crossfadeToNext, sleepSoundDurationSec, allSoundPresets, createPlayableSound]);
 
   useEffect(() => {
     if (sleepMasterRef.current && sleepAudioRef.current && sleepPlaying) sleepMasterRef.current.gain.setTargetAtTime(sleepVolume, sleepAudioRef.current.currentTime, 0.3);
@@ -689,6 +1016,86 @@ export default function BreatheOS() {
   }, [screen, sleepPlaying]);
 
   useEffect(() => () => stopSleepSounds(), [stopSleepSounds]);
+
+  const startCheckout = useCallback(async (pkg: PremiumPackage) => {
+    setCheckoutLoading(true);
+    setCheckoutError("");
+    try {
+      const email = checkoutEmail.trim() || authEmail;
+      if (!email) {
+        setCheckoutError("Enter an email address for the payment receipt.");
+        return;
+      }
+      window.localStorage.setItem("breatheos:pending-premium", JSON.stringify({ packageId: pkg.id }));
+      const res = await fetch("/api/paystack/initialize", {
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ packageId:pkg.id, email, name:checkoutName.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.authorizationUrl) throw new Error(data.error || "Could not start payment.");
+      window.location.href = data.authorizationUrl;
+    } catch (err) {
+      setCheckoutError(err instanceof Error ? err.message : "Could not start payment.");
+    } finally {
+      setCheckoutLoading(false);
+    }
+  }, [authEmail, checkoutEmail, checkoutName]);
+
+  const saveCustomPhases = useCallback(() => {
+    if (!hasPremiumFeature("customPhases")) {
+      setScreen("premium");
+      return;
+    }
+    const next = {
+      inhale: Math.max(1, Math.min(30, Number(customPhaseDraft.inhale) || 1)),
+      holdIn: Math.max(0, Math.min(60, Number(customPhaseDraft.holdIn) || 0)),
+      exhale: Math.max(1, Math.min(45, Number(customPhaseDraft.exhale) || 1)),
+      holdOut: Math.max(0, Math.min(60, Number(customPhaseDraft.holdOut) || 0)),
+    };
+    setCustomPhaseDraft({ inhale:String(next.inhale), holdIn:String(next.holdIn), exhale:String(next.exhale), holdOut:String(next.holdOut) });
+    setPremium(p => ({ ...p, customPhases: next }));
+  }, [customPhaseDraft, hasPremiumFeature]);
+
+  const clearCustomPhases = useCallback(() => {
+    setPremium(p => ({ ...p, customPhases: null }));
+  }, []);
+
+  const handleSoundUpload = useCallback((files: FileList | null) => {
+    if (!files?.length) return;
+    if (!hasPremiumFeature("uploadedSounds")) {
+      setScreen("premium");
+      return;
+    }
+    const nextSounds = Array.from(files)
+      .filter(file => file.type.startsWith("audio/"))
+      .map(file => ({
+        id: `upload:${crypto.randomUUID()}`,
+        name: file.name.replace(/\.[^.]+$/, ""),
+        emoji: "♪",
+        category: "Uploaded",
+        url: URL.createObjectURL(file),
+        fileName: file.name,
+      }));
+    setUploadedSounds(prev => [...prev, ...nextSounds]);
+  }, [hasPremiumFeature]);
+
+  const speakPhase = useCallback((ph: string) => {
+    if (!hasPremiumFeature("voiceCues") || !premium.voiceOn || !("speechSynthesis" in window)) return;
+    const label = (PHASE_CONFIG[ph] ?? PHASE_CONFIG.rest).label.toLowerCase();
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(label);
+    utterance.rate = premium.voiceRate;
+    utterance.pitch = 0.85;
+    utterance.volume = 0.7;
+    window.speechSynthesis.speak(utterance);
+  }, [hasPremiumFeature, premium.voiceOn, premium.voiceRate]);
+
+  const pulseHaptics = useCallback((ph: string) => {
+    if (!hasPremiumFeature("haptics") || !premium.hapticsOn || !("vibrate" in navigator)) return;
+    const pattern = ph === "inhale" ? [35] : ph === "exhale" ? [20, 30, 20] : [45, 35, 45];
+    navigator.vibrate(pattern);
+  }, [hasPremiumFeature, premium.hapticsOn]);
 
   // ── Session engine ────────────────────────────────────────────────
   const animatePhase = useCallback((ph: string, dur: number) => {
@@ -701,17 +1108,23 @@ export default function BreatheOS() {
   const runPhase = useCallback((ph: string, dur: number, onDone: () => void) => {
     clearInterval(timerRef.current!);
     setPhase(ph); animatePhase(ph, dur * countCadenceMultiplier);
+    speakPhase(ph);
+    pulseHaptics(ph);
+    if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type:"phase", userId: myUserId, phase:ph, count:dur }));
     let remaining = dur; setCount(remaining);
     if (dur === 0) { onDone(); return; }
     timerRef.current = setInterval(() => {
       remaining -= 1; setCount(remaining);
+      if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type:"phase", userId: myUserId, phase:ph, count:remaining }));
       if (remaining <= 0) { clearInterval(timerRef.current!); onDone(); }
     }, 1000 * countCadenceMultiplier);
-  }, [animatePhase, countCadenceMultiplier]);
+  }, [animatePhase, countCadenceMultiplier, speakPhase, pulseHaptics, myUserId]);
 
   const cleanupActiveSession = useCallback(() => {
     clearInterval(timerRef.current!); clearInterval(elapsedRef.current!);
-    stopSound(); setSessionActive(false); setPhase("rest"); setShowExitSessionPrompt(false); animatePhase("rest", 1);
+    if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+    if ("vibrate" in navigator) navigator.vibrate(0);
+    stopSound(); setPhase("rest"); setShowExitSessionPrompt(false); animatePhase("rest", 1);
   }, [stopSound, animatePhase]);
 
   const endSession = useCallback((completedCycles: number, total: number) => {
@@ -737,7 +1150,7 @@ export default function BreatheOS() {
   useEffect(() => { runPhaseRef.current = runPhase; }, [runPhase]);
   useEffect(() => { endSessionRef.current = endSession; }, [endSession]);
 
-  const startCycle = (cycleIdx: number, maxCycles: number, pr: Program) => {
+  const startCycle = useCallback((cycleIdx: number, maxCycles: number, pr: Program) => {
     if (cycleIdx >= maxCycles) { endSessionRef.current(cycleIdx, maxCycles); return; }
     setCycleNum(cycleIdx + 1); cycleRef.current.cycleIdx = cycleIdx;
     const p = getPhasesForCycle(pr, cycleIdx); setCurrentCyclePhases(p);
@@ -747,23 +1160,23 @@ export default function BreatheOS() {
     const afterHoldIn = () => runPhaseRef.current("exhale", p.exhale, afterExhale);
     const afterInhale = () => p.holdIn > 0 ? runPhaseRef.current("holdIn", p.holdIn, afterHoldIn) : afterHoldIn();
     runPhaseRef.current("inhale", p.inhale, afterInhale);
-  };
+  }, []);
    useEffect(() => { startCycleRef.current = startCycle; }, [startCycle]);
 
   const startSession = useCallback(() => {
     if (!rec || !safetyConsentAccepted || !guardianConsentAcknowledged) { setScreen("setup"); return; }
-    const pr = getProgramForDay(trainingDay, goal);
+    const pr = activeProgram;
     const allPhases = [pr.phases, ...(pr.altPhases ?? [])];
     const avgCycle = (allPhases.reduce((s, p) => s + p.inhale + p.holdIn + p.exhale + p.holdOut, 0) / allPhases.length) * countCadenceMultiplier;
     const total = Math.max(4, Math.floor((rec.minutes * 60) / avgCycle));
     setTotalCycles(total); setCycleNum(0); setElapsed(0);
-    setSessionActive(true); setSessionStarted(true); setShowExitSessionPrompt(false);
+    setSessionStarted(true); setShowExitSessionPrompt(false);
     sessionDateRef.current = today(); setScreen("session"); startSound();
     elapsedRef.current = setInterval(() => setElapsed(e => e + 1), 1000);
     startCycleRef.current(0, total, pr);
     // Broadcast to together peers
     if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type:"phase", userId: myUserId, phase:"inhale", count:0 }));
-  }, [rec, trainingDay, goal, startSound, countCadenceMultiplier, safetyConsentAccepted, guardianConsentAcknowledged, myUserId]);
+  }, [rec, activeProgram, startSound, countCadenceMultiplier, safetyConsentAccepted, guardianConsentAcknowledged, myUserId]);
 
   const stopEarly = useCallback(() => endSession(cycleNum, totalCycles), [cycleNum, totalCycles, endSession]);
   const restartCurrentSession = useCallback(() => { cleanupActiveSession(); startSession(); }, [cleanupActiveSession, startSession]);
@@ -853,17 +1266,70 @@ export default function BreatheOS() {
     setTrainingDay(1); setHistory({}); setBpLog([]);
     setSleepDuration(0); setSleepVolume(0.7); setSleepSelectedSoundIds(DEFAULT_SLEEP_SOUND_IDS);
     setCountCadenceMultiplier(1.25); setSafetyConsentAccepted(false); setGuardianConsentAcknowledged(false);
+    setPremium(DEFAULT_PREMIUM_SETTINGS); setCustomPhaseDraft({ inhale:"5", holdIn:"2", exhale:"7", holdOut:"0" });
+    setSavedSoundMixes([]); setSavedRoutines([]); setTrainingProfiles([]);
     setLastSessionSummary(null); setShowBpModal(false); setRemindersOn(false);
     setScreen("welcome");
   }, [cleanupActiveSession, stopSleepSounds, DEFAULT_SLEEP_SOUND_IDS]);
 
   const handleExport = () => {
-    if (authSession?.user?.id) { window.open("/api/export"); return; }
-    const data = { profile, bpLog, history, trainingDay, goal };
+    if (authSession?.user?.id) {
+      window.open(hasPremiumFeature("advancedExport") ? "/api/export?advanced=1" : "/api/export");
+      return;
+    }
+    const data = hasPremiumFeature("advancedExport")
+      ? { profile, bpLog, history, trainingDay, goal, premium, streakStats, savedSoundMixes, savedRoutines, trainingProfiles, exportedAt:new Date().toISOString() }
+      : { profile, bpLog, history, trainingDay, goal };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type:"application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a"); a.href = url; a.download = `breatheos-${today()}.json`; a.click(); URL.revokeObjectURL(url);
   };
+
+  const saveSoundMix = useCallback(() => {
+    if (!hasPremiumFeature("savedSoundMixes")) { setScreen("premium"); return; }
+    setSavedSoundMixes(prev => [...prev, {
+      id: crypto.randomUUID(),
+      name: soundMixName.trim() || `Mix ${prev.length + 1}`,
+      sessionSoundIds: sessionSelectedSoundIds,
+      sleepSoundIds: sleepSelectedSoundIds,
+    }]);
+  }, [hasPremiumFeature, sessionSelectedSoundIds, sleepSelectedSoundIds, soundMixName]);
+
+  const applySoundMix = useCallback((mix: SavedSoundMix) => {
+    if (!hasPremiumFeature("savedSoundMixes")) { setScreen("premium"); return; }
+    setSessionSelectedSoundIds(mix.sessionSoundIds.length ? mix.sessionSoundIds : ["Ocean Waves"]);
+    setSleepSelectedSoundIds(mix.sleepSoundIds.length ? mix.sleepSoundIds : DEFAULT_SLEEP_SOUND_IDS);
+  }, [DEFAULT_SLEEP_SOUND_IDS, hasPremiumFeature]);
+
+  const saveRoutine = useCallback(() => {
+    if (!hasPremiumFeature("savedRoutines")) { setScreen("premium"); return; }
+    const phases = premium.customPhases ?? {
+      inhale: Math.max(1, Number(customPhaseDraft.inhale) || 1),
+      holdIn: Math.max(0, Number(customPhaseDraft.holdIn) || 0),
+      exhale: Math.max(1, Number(customPhaseDraft.exhale) || 1),
+      holdOut: Math.max(0, Number(customPhaseDraft.holdOut) || 0),
+    };
+    setSavedRoutines(prev => [...prev, { id:crypto.randomUUID(), name:routineName.trim() || `Routine ${prev.length + 1}`, phases }]);
+  }, [customPhaseDraft, hasPremiumFeature, premium.customPhases, routineName]);
+
+  const applyRoutine = useCallback((routine: SavedRoutine) => {
+    if (!hasPremiumFeature("savedRoutines")) { setScreen("premium"); return; }
+    setPremium(p => ({ ...p, customPhases:routine.phases }));
+    setCustomPhaseDraft({ inhale:String(routine.phases.inhale), holdIn:String(routine.phases.holdIn), exhale:String(routine.phases.exhale), holdOut:String(routine.phases.holdOut) });
+  }, [hasPremiumFeature]);
+
+  const saveTrainingProfile = useCallback(() => {
+    if (!hasPremiumFeature("trainingProfiles")) { setScreen("premium"); return; }
+    setTrainingProfiles(prev => [...prev, { id:crypto.randomUUID(), name:trainingProfileName.trim() || `Profile ${prev.length + 1}`, profile, goal }]);
+  }, [goal, hasPremiumFeature, profile, trainingProfileName]);
+
+  const applyTrainingProfile = useCallback((item: TrainingProfile) => {
+    if (!hasPremiumFeature("trainingProfiles")) { setScreen("premium"); return; }
+    setProfile(item.profile);
+    Object.entries(item.profile).forEach(([k,v]) => setValue(k as keyof SetupForm, v as string));
+    setGoal(item.goal);
+    setRec(getRecommendation(item.profile, item.goal));
+  }, [hasPremiumFeature, setValue]);
 
   // ── Style helpers ─────────────────────────────────────────────────
   // glassCard = combined double-bezel visual
@@ -875,12 +1341,6 @@ export default function BreatheOS() {
     boxShadow: "inset 0 1px 0 rgba(127,255,212,0.06), 0 1px 3px rgba(0,0,0,0.4)",
     backdropFilter: "blur(12px)",
     WebkitBackdropFilter: "blur(12px)",
-  };
-  const glassCardInner: React.CSSProperties = {
-    background: "rgba(6,18,32,0.75)",
-    borderRadius: 15,
-    padding: 20,
-    boxShadow: "inset 0 1px 1px rgba(127,255,212,0.04)",
   };
   const labelStyle: React.CSSProperties = { display:"block", fontFamily:"'Cormorant Garamond',serif", color:"rgba(127,255,212,0.65)", fontSize:11, letterSpacing:2.5, textTransform:"uppercase", marginBottom:7 };
   const renderSleepVolumeControl = (framed = false) => (
@@ -928,26 +1388,28 @@ export default function BreatheOS() {
     <div style={{ height:"100dvh", width:"100vw", background:"linear-gradient(135deg,#030b14 0%,#0a1628 50%,#061220 100%)", backgroundSize:"400% 400%", animation:"breatheos-gradient 20s ease infinite", fontFamily:"Georgia,serif", color:"#e8f4f0", overflow:"hidden", position:"relative" }}>
       <div style={{ position:"fixed", inset:0, pointerEvents:"none", background:"radial-gradient(ellipse at 20% 20%,rgba(127,255,212,0.04) 0%,transparent 50%),radial-gradient(ellipse at 80% 80%,rgba(135,206,235,0.03) 0%,transparent 50%),radial-gradient(ellipse at 50% 50%,rgba(192,132,252,0.02) 0%,transparent 60%)", zIndex:0 }} />
 
-      {/* ── BP Modal (shadcn Dialog) ── */}
-      <Dialog open={showBpModal} onOpenChange={setShowBpModal}>
-        <DialogContent style={{ background:"rgba(10,22,40,0.97)", border:"1px solid rgba(127,255,212,0.2)", borderRadius:16, maxWidth:380 }}>
-          <DialogHeader>
-            <div style={{textAlign:"center",marginBottom:12}}><span style={{fontSize:44}}>🩺</span></div>
-            <DialogTitle style={{fontFamily:"'Playfair Display',serif",fontSize:24,color:"#7fffd4",textAlign:"center"}}>Time for a BP Check</DialogTitle>
-          </DialogHeader>
-          <p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:14,color:"rgba(232,244,240,0.6)",lineHeight:1.6,textAlign:"center",marginBottom:16}}>
-            You&apos;ve completed {trainingDay} days! Enter your current blood pressure.
-          </p>
-          {bpLog[0] && <div style={{textAlign:"center",marginBottom:16,padding:10,background:"rgba(127,255,212,0.06)",borderRadius:8}}><span style={{fontFamily:"'Cormorant Garamond',serif",fontSize:13,color:"rgba(127,255,212,0.5)",letterSpacing:2}}>STARTING BP </span><span style={{fontFamily:"'Playfair Display',serif",fontSize:18,color:"#e8f4f0"}}>{bpLog[0].s}/{bpLog[0].d}</span></div>}
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:16}}>
-            {([["Systolic","s"],["Diastolic","d"]] as const).map(([lbl,k]) => (
-              <div key={k}><label style={labelStyle}>{lbl}</label><input className="breatheos-input" type="number" placeholder={k==="s"?"120":"80"} value={newBp[k]} onChange={e=>setNewBp(b=>({...b,[k]:e.target.value}))} onWheel={e=>e.currentTarget.blur()} /></div>
-            ))}
-          </div>
-          <motion.button whileHover={{scale:1.02}} whileTap={{scale:0.98}} className="breatheos-btn" style={{width:"100%",marginBottom:10}} onClick={handleNewBp}>Save Reading</motion.button>
-          <motion.button whileHover={{scale:1.01}} whileTap={{scale:0.98}} className="breatheos-btn-ghost" style={{width:"100%",textAlign:"center"}} onClick={()=>setShowBpModal(false)}>Skip for now</motion.button>
-        </DialogContent>
-      </Dialog>
+      {/* BP Modal */}
+      <AnimatePresence>
+        {showBpModal && (
+          <motion.div role="dialog" aria-modal="true" aria-labelledby="bp-modal-title" initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} transition={{duration:0.2}} style={{position:"fixed",inset:0,zIndex:420,display:"flex",alignItems:"center",justifyContent:"center",padding:24,pointerEvents:"auto"}}>
+            <motion.div initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} onClick={()=>setShowBpModal(false)} style={{position:"absolute",inset:0,background:"rgba(3,11,20,0.86)",backdropFilter:"blur(10px)",WebkitBackdropFilter:"blur(10px)"}} />
+            <motion.div initial={{opacity:0,y:18,scale:0.96}} animate={{opacity:1,y:0,scale:1}} exit={{opacity:0,y:12,scale:0.98}} transition={{type:"spring",stiffness:420,damping:36}} style={{position:"relative",zIndex:421,width:"100%",maxWidth:380,background:"rgba(10,22,40,0.97)",border:"1px solid rgba(127,255,212,0.2)",borderRadius:16,padding:24,boxShadow:"0 24px 70px rgba(0,0,0,0.55), inset 0 1px 0 rgba(127,255,212,0.07)"}}>
+              <button type="button" aria-label="Close BP check" onClick={()=>setShowBpModal(false)} style={{position:"absolute",top:12,right:12,width:32,height:32,borderRadius:"50%",border:"1px solid rgba(127,255,212,0.14)",background:"rgba(127,255,212,0.04)",color:"rgba(232,244,240,0.55)",cursor:"pointer",fontSize:18,lineHeight:1}}>×</button>
+              <div style={{textAlign:"center",marginBottom:12}}><span style={{fontSize:44}}>🩺</span></div>
+              <h2 id="bp-modal-title" style={{fontFamily:"'Playfair Display',serif",fontSize:24,color:"#7fffd4",textAlign:"center",marginBottom:12}}>Time for a BP Check</h2>
+              <p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:14,color:"rgba(232,244,240,0.6)",lineHeight:1.6,textAlign:"center",marginBottom:16}}>You&apos;ve completed {trainingDay} days. Enter your current blood pressure.</p>
+              {bpLog[0] && <div style={{textAlign:"center",marginBottom:16,padding:10,background:"rgba(127,255,212,0.06)",borderRadius:8}}><span style={{fontFamily:"'Cormorant Garamond',serif",fontSize:13,color:"rgba(127,255,212,0.5)",letterSpacing:2}}>STARTING BP </span><span style={{fontFamily:"'Playfair Display',serif",fontSize:18,color:"#e8f4f0"}}>{bpLog[0].s}/{bpLog[0].d}</span></div>}
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:16}}>
+                {([["Systolic","s"],["Diastolic","d"]] as const).map(([lbl,k]) => (
+                  <div key={k}><label style={labelStyle}>{lbl}</label><input className="breatheos-input" type="number" placeholder={k==="s"?"120":"80"} value={newBp[k]} onChange={e=>setNewBp(b=>({...b,[k]:e.target.value}))} onWheel={e=>e.currentTarget.blur()} /></div>
+                ))}
+              </div>
+              <motion.button whileHover={{scale:1.02}} whileTap={{scale:0.98}} className="breatheos-btn" style={{width:"100%",marginBottom:10}} onClick={handleNewBp}>Save Reading</motion.button>
+              <motion.button whileHover={{scale:1.01}} whileTap={{scale:0.98}} className="breatheos-btn-ghost" style={{width:"100%",textAlign:"center"}} onClick={()=>setShowBpModal(false)}>Skip for now</motion.button>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* ══ EXIT SESSION MODAL ══
            FIX: Framer Motion’s animate={{y:0}} overwrites the CSS transform property
@@ -958,11 +1420,13 @@ export default function BreatheOS() {
            Mobile: flexbox end (alignItems center + justifyContent flex-end = bottom) */}
       <AnimatePresence>
         {showExitSessionPrompt && (
-          <div
+          <motion.div
+            initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} transition={{duration:0.2}}
             style={{ position:"fixed", inset:0, zIndex:1000,
               display:"flex",
               alignItems: isDesktop ? "center" : "flex-end",
               justifyContent: "center",
+              pointerEvents:"auto",
             }}
           >
             {/* Backdrop */}
@@ -1011,7 +1475,7 @@ export default function BreatheOS() {
                 End and Save Progress
               </motion.button>
             </motion.div>
-          </div>
+          </motion.div>
         )}
       </AnimatePresence>
 
@@ -1023,9 +1487,9 @@ export default function BreatheOS() {
           <Command.Input placeholder="Search sounds…" className="breatheos-input" style={{marginBottom:12}} />
           <Command.List>
             <Command.Empty style={{fontFamily:"'Cormorant Garamond',serif",color:"rgba(232,244,240,0.4)",padding:12,textAlign:"center"}}>No sounds found.</Command.Empty>
-            {SOUND_PRESETS.map(s => (
+            {allSoundPresets.map(s => (
               <Command.Item key={s.id} value={s.name} onSelect={() => {
-                if (soundSearchTarget === "session") setSessionSelectedSoundIds(prev => prev.includes(s.id) ? prev : [...prev, s.id]);
+                if (soundSearchTarget === "session") setSessionSelectedSoundIds(prev => prev.includes(s.id) ? prev : (hasPremiumFeature("unlimitedSounds") || prev.length < FREE_SESSION_SOUND_LIMIT ? [...prev, s.id] : prev));
                 else setSleepSelectedSoundIds(prev => prev.includes(s.id) ? prev : [...prev, s.id]);
                 setSoundSearchOpen(false);
               }} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",borderRadius:8,cursor:"pointer",fontFamily:"'Cormorant Garamond',serif",color:"rgba(232,244,240,0.8)"}}>
@@ -1234,7 +1698,7 @@ export default function BreatheOS() {
                 <motion.div variants={fadeInUp} style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:12,marginBottom:28}}>
                   <div>
                     <h2 style={{fontFamily:"'Playfair Display',serif",fontSize:32,color:"#7fffd4",marginBottom:4}}>Day {trainingDay}</h2>
-                    <p style={{fontFamily:"'Cormorant Garamond',serif",color:"rgba(232,244,240,0.5)",fontSize:14}}>{prog.name} · {prog.technique}</p>
+                    <p style={{fontFamily:"'Cormorant Garamond',serif",color:"rgba(232,244,240,0.5)",fontSize:14}}>{activeProgram.name} · {activeProgram.technique}</p>
                   </div>
                   <div style={{textAlign:"right"}}>
                     <p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:12,color:"rgba(127,255,212,0.4)",marginBottom:2}}>Today&apos;s goal</p>
@@ -1248,10 +1712,22 @@ export default function BreatheOS() {
 
                 <motion.div variants={fadeInUp} style={{...glassCard,marginBottom:16}}>
                   <p style={labelStyle}>Today&apos;s Program</p>
-                  <p style={{fontFamily:"'Playfair Display',serif",fontSize:20,color:"#e8f4f0",marginBottom:6}}>{prog.emoji} {prog.name}</p>
-                  <p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:14,color:"rgba(232,244,240,0.55)",lineHeight:1.6,marginBottom:10}}>{prog.desc}</p>
+                  <p style={{fontFamily:"'Playfair Display',serif",fontSize:20,color:"#e8f4f0",marginBottom:6}}>{activeProgram.emoji} {activeProgram.name}</p>
+                  <p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:14,color:"rgba(232,244,240,0.55)",lineHeight:1.6,marginBottom:10}}>{activeProgram.desc}</p>
                   <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-                    {Object.entries(prog.phases).map(([k,v])=>v>0&&(<span key={k} style={{background:"rgba(127,255,212,0.06)",border:"1px solid rgba(127,255,212,0.1)",borderRadius:20,padding:"4px 12px",fontSize:12,fontFamily:"'Cormorant Garamond',serif",color:"rgba(127,255,212,0.7)"}}>{k==="inhale"?"In":k==="holdIn"?"Hold":k==="exhale"?"Out":"Hold∅"}: {v}s</span>))}
+                    {Object.entries(activeProgram.phases).map(([k,v])=>v>0&&(<span key={k} style={{background:"rgba(127,255,212,0.06)",border:"1px solid rgba(127,255,212,0.1)",borderRadius:20,padding:"4px 12px",fontSize:12,fontFamily:"'Cormorant Garamond',serif",color:"rgba(127,255,212,0.7)"}}>{k==="inhale"?"In":k==="holdIn"?"Hold":k==="exhale"?"Out":"Hold∅"}: {v}s</span>))}
+                  </div>
+                </motion.div>
+
+                <motion.div variants={fadeInUp} style={{...glassCard,marginBottom:16,border:isPremium?"1px solid rgba(255,215,0,0.22)":"1px solid rgba(127,255,212,0.09)"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,marginBottom:8}}>
+                    <div>
+                      <p style={labelStyle}>{isPremium ? "Premium Active" : "Premium"}</p>
+                      <p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:13,color:"rgba(232,244,240,0.52)",lineHeight:1.5}}>
+                        {isPremium ? `${activePremiumPackage?.name ?? "Premium"} active · ${hasPremiumFeature("streakStats") ? `${streakStats.longest} day best streak` : "package unlocks applied"}` : "Premium packages unlock sounds, coaching, custom timing, and deeper stats."}
+                      </p>
+                    </div>
+                    <motion.button whileHover={{scale:1.02}} whileTap={{scale:0.98}} className="breatheos-btn-ghost" onClick={()=>setScreen("settings")}>{isPremium ? "Manage" : "Upgrade"}</motion.button>
                   </div>
                 </motion.div>
 
@@ -1299,7 +1775,7 @@ export default function BreatheOS() {
               exit={{ opacity:0, transition:{ duration:0.25 } }} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding: isDesktop ? "40px 80px" : "24px 28px",position:"relative",overflow:"hidden"}}>
               <FloatingParticles />
               <div style={{position:"absolute",top:16,left:0,right:0,padding:"0 24px",display:"flex",alignItems:"center",justifyContent:"space-between",zIndex:2}}>
-                <div style={{fontFamily:"'Cormorant Garamond',serif",fontSize:13,color:"rgba(127,255,212,0.5)",letterSpacing:1}}>Day {trainingDay} · {prog.name}</div>
+                <div style={{fontFamily:"'Cormorant Garamond',serif",fontSize:13,color:"rgba(127,255,212,0.5)",letterSpacing:1}}>Day {trainingDay} · {activeProgram.name}</div>
                 <motion.button whileHover={{scale:1.05}} whileTap={{scale:0.95}} onClick={()=>setShowExitSessionPrompt(true)} style={{background:"rgba(248,113,113,0.08)",border:"1px solid rgba(248,113,113,0.2)",color:"rgba(248,113,113,0.7)",borderRadius:20,padding:"6px 14px",cursor:"pointer",fontFamily:"'Cormorant Garamond',serif",fontSize:12,letterSpacing:1}}>End</motion.button>
               </div>
 
@@ -1365,6 +1841,18 @@ export default function BreatheOS() {
                     <div style={{fontFamily:"'Cormorant Garamond',serif",fontSize:11,color:"rgba(232,244,240,0.4)",letterSpacing:2,textTransform:"uppercase"}}>{l}</div>
                   </div>
                 ))}
+              </motion.div>
+              <motion.div initial={{opacity:0,y:10}} animate={{opacity:1,y:0}} transition={{delay:0.56}} style={{...glassCard,width:"100%",maxWidth:360,marginBottom:22,border:hasPremiumFeature("sessionFeedback")?"1px solid rgba(255,215,0,0.18)":"1px solid rgba(127,255,212,0.08)"}}>
+                <p style={labelStyle}>{hasPremiumFeature("sessionFeedback") ? "Coach Feedback" : "Coach Feedback 🔒"}</p>
+                <p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:14,color:"rgba(232,244,240,0.58)",lineHeight:1.6}}>
+                  {hasPremiumFeature("sessionFeedback")
+                    ? lastSessionSummary.status === "complete"
+                      ? "Strong completion. Keep the same cadence next session and protect the streak."
+                      : lastSessionSummary.status === "partial"
+                        ? "Good start. Try a shorter pace or fewer distractions next session so you can cross the 90% mark."
+                        : "Reset gently. A missed session still counts as information. Restart with the Foundation rhythm."
+                    : "Upgrade to Coach Pack to get session-specific guidance after each practice."}
+                </p>
               </motion.div>
               <motion.button whileHover={{scale:1.02}} whileTap={{scale:0.98}} initial={{opacity:0,y:10}} animate={{opacity:1,y:0}} transition={{delay:0.6}} className="breatheos-btn" style={{width:"100%",maxWidth:320,marginBottom:12}} onClick={startSession}>▶ Go Again</motion.button>
               <motion.button whileHover={{scale:1.01}} whileTap={{scale:0.98}} initial={{opacity:0}} animate={{opacity:1}} transition={{delay:0.7}} className="breatheos-btn-ghost" onClick={()=>setScreen("dashboard")}>Back to Dashboard</motion.button>
@@ -1672,6 +2160,115 @@ export default function BreatheOS() {
           )}
         </AnimatePresence>
 
+        {/* ══ PREMIUM ══ */}
+        <AnimatePresence mode="wait">
+          {screen === "premium" && (
+            <motion.div key="premium" variants={pageVariants} initial="initial" animate="animate" exit="exit" style={{flex:1,padding:"28px 24px",overflowY:"auto"}} className="breatheos-scroll">
+              <motion.div variants={staggerContainer} initial="initial" animate="animate">
+                <motion.div variants={fadeInUp} style={{textAlign:"center",marginBottom:24}}>
+                  <div style={{fontSize:34,marginBottom:8,color:"#ffd700"}}>◆</div>
+                  <h2 style={{fontFamily:"'Playfair Display',serif",fontSize:32,color:"#ffd700",marginBottom:6}}>BreatheOS Premium</h2>
+                  <p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:14,color:"rgba(232,244,240,0.52)",lineHeight:1.6}}>Choose a package. Higher plans include everything below them.</p>
+                </motion.div>
+
+                <motion.div variants={fadeInUp} style={{...glassCard,marginBottom:16,border:"1px solid rgba(255,215,0,0.18)"}}>
+                  <p style={labelStyle}>Premium Features</p>
+                  <div style={{display:"grid",gridTemplateColumns:isDesktop?"repeat(2,minmax(0,1fr))":"1fr",gap:10}}>
+                    {PREMIUM_FEATURES.map(feature => {
+                      const unlocked = hasPremiumFeature(feature.id);
+                      return (
+                        <div key={feature.id} style={{display:"flex",gap:12,alignItems:"flex-start",background:unlocked?"rgba(255,215,0,0.07)":"rgba(127,255,212,0.03)",border:`1px solid ${unlocked?"rgba(255,215,0,0.2)":"rgba(127,255,212,0.08)"}`,borderRadius:10,padding:"12px 13px"}}>
+                          <span style={{fontSize:16,lineHeight:1,color:unlocked?"#ffd700":"rgba(232,244,240,0.35)"}}>{unlocked ? "✓" : "🔒"}</span>
+                          <div>
+                            <p style={{fontFamily:"'Playfair Display',serif",fontSize:15,color:unlocked?"#ffd700":"rgba(232,244,240,0.72)",marginBottom:3}}>{feature.name}</p>
+                            <p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:12,color:"rgba(232,244,240,0.42)",lineHeight:1.45}}>{feature.detail}</p>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </motion.div>
+
+                <motion.div variants={fadeInUp} style={{display:"grid",gridTemplateColumns:isDesktop?"repeat(3,minmax(0,1fr))":"1fr",gap:12,marginBottom:16}}>
+                  {PREMIUM_PACKAGES.map(pkg => {
+                    const active = premium.subscriptionTier === pkg.id && isPremium;
+                    return (
+                      <motion.div key={pkg.id} whileHover={{y:-3}} style={{...glassCard,border:pkg.highlight?"1px solid rgba(255,215,0,0.35)":active?"1px solid rgba(127,255,212,0.35)":"1px solid rgba(127,255,212,0.09)",background:pkg.highlight?"linear-gradient(135deg,rgba(255,215,0,0.08),rgba(127,255,212,0.025))":"linear-gradient(135deg,rgba(127,255,212,0.035),rgba(6,18,32,0.8))"}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,marginBottom:8}}>
+                          <h3 style={{fontFamily:"'Playfair Display',serif",fontSize:21,color:pkg.highlight?"#ffd700":"#7fffd4"}}>{pkg.name}</h3>
+                          {active && <span style={{fontFamily:"'Cormorant Garamond',serif",fontSize:10,color:"#7fffd4",letterSpacing:1.5,textTransform:"uppercase"}}>Active</span>}
+                        </div>
+                        <p style={{fontFamily:"'Playfair Display',serif",fontSize:24,color:"#e8f4f0",marginBottom:4}}>{pkg.price}</p>
+                        <p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:13,color:"rgba(232,244,240,0.48)",lineHeight:1.5,marginBottom:12}}>{pkg.tagline}</p>
+                        <div style={{display:"grid",gap:6,marginBottom:14}}>
+                          {PREMIUM_FEATURES.filter(feature => PREMIUM_PACKAGES.some(tier => tier.level <= pkg.level && tier.unlocks.includes(feature.id))).map(feature => (
+                            <div key={feature.id} style={{fontFamily:"'Cormorant Garamond',serif",fontSize:12,color:"rgba(232,244,240,0.62)",display:"flex",gap:7}}>
+                              <span style={{color:"#ffd700"}}>✓</span><span>{feature.name}</span>
+                            </div>
+                          ))}
+                        </div>
+                        <motion.button whileHover={{scale:active?1:1.02}} whileTap={{scale:active?1:0.98}} className={active?"breatheos-btn-ghost":"breatheos-btn"} style={{width:"100%",fontSize:13,padding:"11px 12px",opacity:active?0.72:1}} disabled={active} onClick={()=>{setCheckoutPackageId(pkg.id);setScreen("checkout");}}>
+                          {active ? "Current Package" : "Upgrade"}
+                        </motion.button>
+                      </motion.div>
+                    );
+                  })}
+                </motion.div>
+
+                <motion.div variants={fadeInUp} style={{...glassCard,marginBottom:20}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,marginBottom:10}}>
+                    <div>
+                      <p style={labelStyle}>Downloaded Sound Files</p>
+                      <p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:13,color:"rgba(232,244,240,0.48)",lineHeight:1.5}}>Upload your own MP3, WAV, M4A, or OGG files. This is unlocked by Calm Pack or Studio Pack.</p>
+                    </div>
+                    {!hasPremiumFeature("uploadedSounds") && <span style={{fontSize:18}}>🔒</span>}
+                  </div>
+                  <input aria-label="Upload sound files" type="file" accept="audio/*" multiple disabled={!hasPremiumFeature("uploadedSounds")} onChange={event=>handleSoundUpload(event.currentTarget.files)} style={{width:"100%",fontFamily:"'Cormorant Garamond',serif",fontSize:13,color:hasPremiumFeature("uploadedSounds")?"rgba(232,244,240,0.72)":"rgba(232,244,240,0.25)",marginBottom:10}} />
+                  {uploadedSounds.length > 0 && (
+                    <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                      {uploadedSounds.map(sound => <span key={sound.id} style={{border:"1px solid rgba(255,215,0,0.18)",background:"rgba(255,215,0,0.06)",borderRadius:999,padding:"6px 10px",fontFamily:"'Cormorant Garamond',serif",fontSize:12,color:"rgba(232,244,240,0.75)"}}>♪ {sound.name}</span>)}
+                    </div>
+                  )}
+                </motion.div>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* ══ CHECKOUT ══ */}
+        <AnimatePresence mode="wait">
+          {screen === "checkout" && (
+            <motion.div key="checkout" variants={pageVariants} initial="initial" animate="animate" exit="exit" style={{flex:1,padding:"28px 24px",overflowY:"auto"}} className="breatheos-scroll">
+              {(() => {
+                const pkg = PREMIUM_PACKAGES.find(p => p.id === checkoutPackageId) ?? PREMIUM_PACKAGES[0];
+                return (
+                  <motion.div variants={staggerContainer} initial="initial" animate="animate">
+                    <motion.button variants={fadeInUp} className="breatheos-btn-ghost" style={{fontSize:12,marginBottom:18}} onClick={()=>setScreen("premium")}>← Back</motion.button>
+                    <motion.div variants={fadeInUp} style={{...glassCard,border:"1px solid rgba(255,215,0,0.26)"}}>
+                      <p style={labelStyle}>Checkout</p>
+                      <h2 style={{fontFamily:"'Playfair Display',serif",fontSize:30,color:"#ffd700",marginBottom:6}}>{pkg.name}</h2>
+                      <p style={{fontFamily:"'Playfair Display',serif",fontSize:28,color:"#e8f4f0",marginBottom:10}}>{pkg.price}</p>
+                      <p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:14,color:"rgba(232,244,240,0.55)",lineHeight:1.6,marginBottom:16}}>Pay securely through Paystack. Your package unlocks after payment verification.</p>
+                      <div style={{display:"grid",gap:8,marginBottom:16}}>
+                        {PREMIUM_FEATURES.filter(feature => PREMIUM_PACKAGES.some(tier => tier.level <= pkg.level && tier.unlocks.includes(feature.id))).map(feature => (
+                          <div key={feature.id} style={{display:"flex",gap:8,fontFamily:"'Cormorant Garamond',serif",fontSize:13,color:"rgba(232,244,240,0.68)"}}><span style={{color:"#ffd700"}}>✓</span>{feature.name}</div>
+                        ))}
+                      </div>
+                      <div style={{display:"grid",gap:12,marginBottom:14}}>
+                        <div><label style={labelStyle}>Email</label><input className="breatheos-input" type="email" value={checkoutEmail || authEmail} onChange={e=>setCheckoutEmail(e.target.value)} placeholder="you@example.com" /></div>
+                        <div><label style={labelStyle}>Name</label><input className="breatheos-input" value={checkoutName} onChange={e=>setCheckoutName(e.target.value)} placeholder="Optional" /></div>
+                      </div>
+                      {checkoutError && <p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:13,color:"rgba(248,113,113,0.86)",lineHeight:1.5,marginBottom:12}}>{checkoutError}</p>}
+                      <motion.button whileHover={{scale:checkoutLoading?1:1.02}} whileTap={{scale:checkoutLoading?1:0.98}} className="breatheos-btn" style={{width:"100%",fontSize:16,padding:"16px",marginBottom:10,opacity:checkoutLoading?0.7:1}} disabled={checkoutLoading} onClick={()=>startCheckout(pkg)}>{checkoutLoading ? "Opening Paystack..." : "Pay with Paystack"}</motion.button>
+                      <button className="breatheos-btn-ghost" style={{width:"100%",fontSize:13}} onClick={()=>setScreen("premium")}>Cancel</button>
+                    </motion.div>
+                  </motion.div>
+                );
+              })()}
+            </motion.div>
+          )}
+        </AnimatePresence>
+
         {/* ══ BP PROGRESS ══ */}
         <AnimatePresence mode="wait">
           {screen === "bp" && (
@@ -1685,7 +2282,7 @@ export default function BreatheOS() {
                   <motion.button whileHover={{scale:1.02}} whileTap={{scale:0.98}} className="breatheos-btn-ghost" onClick={handleExport} style={{fontSize:12,padding:"8px 14px",whiteSpace:"nowrap"}}>⬇ Export Data</motion.button>
                 </motion.div>
 
-                <motion.div variants={scaleIn}><BpChart bpLog={bpLog} trainingDay={trainingDay} rec={rec} /></motion.div>
+                <motion.div variants={scaleIn}><BpChart bpLog={bpLog} rec={rec} /></motion.div>
 
                 <motion.div variants={fadeInUp} style={{...glassCard,marginTop:16,marginBottom:16}}>
                   <p style={labelStyle}>Reading History</p>
@@ -1858,6 +2455,152 @@ export default function BreatheOS() {
                 <motion.h2 variants={fadeInUp} style={{fontFamily:"'Playfair Display',serif",fontSize:30,color:"#7fffd4",marginBottom:4}}>Session Settings</motion.h2>
                 <motion.p variants={fadeInUp} style={{fontFamily:"'Cormorant Garamond',serif",color:"rgba(232,244,240,0.45)",fontSize:14,marginBottom:24}}>Fine-tune how sessions sound and feel</motion.p>
 
+                <motion.div variants={fadeInUp} style={{...glassCard,marginBottom:16,border:isPremium?"1px solid rgba(255,215,0,0.22)":"1px solid rgba(127,255,212,0.14)",background:isPremium?"linear-gradient(135deg,rgba(255,215,0,0.07),rgba(127,255,212,0.025))":"linear-gradient(135deg,rgba(127,255,212,0.05),rgba(135,206,235,0.025))"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:12,marginBottom:14}}>
+                    <div>
+                      <p style={labelStyle}>Premium</p>
+                      <h3 style={{fontFamily:"'Playfair Display',serif",fontSize:22,color:isPremium?"#ffd700":"#7fffd4",marginBottom:4}}>{isPremium ? "Unlocked" : "Upgrade BreatheOS"}</h3>
+                      <p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:13,color:"rgba(232,244,240,0.55)",lineHeight:1.55}}>
+                        {isPremium ? `Active until ${premium.subscriptionExpiry ? new Date(premium.subscriptionExpiry).toLocaleDateString() : "lifetime"}.` : "Custom phases, voice guidance, haptics, named profile, deeper streaks, and unlimited session sound mixes."}
+                      </p>
+                    </div>
+                    {!isPremium && <motion.button whileHover={{scale:1.02}} whileTap={{scale:0.98}} className="breatheos-btn" style={{fontSize:13,padding:"10px 14px",whiteSpace:"nowrap"}} onClick={()=>setScreen("premium")}>View Plans</motion.button>}
+                  </div>
+                  {isPremium ? (
+                    <div style={{display:"grid",gap:12}}>
+                      <div style={{opacity:hasPremiumFeature("profileName")?1:0.45}}>
+                        <label style={labelStyle}>Profile Name</label>
+                        <input className="breatheos-input" disabled={!hasPremiumFeature("profileName")} value={premium.profileName} onChange={e=>setPremium(p=>({...p,profileName:e.target.value || "Default"}))} />
+                      </div>
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,background:"rgba(127,255,212,0.04)",border:"1px solid rgba(127,255,212,0.1)",borderRadius:10,padding:"10px 12px"}}>
+                          <div><Label style={{...labelStyle,marginBottom:1}}>Voice Cues</Label><p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:11,color:"rgba(232,244,240,0.35)"}}>Speak phase changes</p></div>
+                          <Switch checked={premium.voiceOn} disabled={!hasPremiumFeature("voiceCues")} onCheckedChange={v=>setPremium(p=>({...p,voiceOn:v}))} />
+                        </div>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,background:"rgba(127,255,212,0.04)",border:"1px solid rgba(127,255,212,0.1)",borderRadius:10,padding:"10px 12px"}}>
+                          <div><Label style={{...labelStyle,marginBottom:1}}>Haptics</Label><p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:11,color:"rgba(232,244,240,0.35)"}}>Phase vibration</p></div>
+                          <Switch checked={premium.hapticsOn} disabled={!hasPremiumFeature("haptics")} onCheckedChange={v=>setPremium(p=>({...p,hapticsOn:v}))} />
+                        </div>
+                      </div>
+                      <div>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}><label style={{...labelStyle,marginBottom:0}}>Voice Rate</label><span style={{fontFamily:"'Cormorant Garamond',serif",fontSize:13,color:"#7fffd4"}}>{premium.voiceRate.toFixed(1)}x</span></div>
+                        <input className="breatheos-volume-range" type="range" min={0.7} max={1.4} step={0.1} value={premium.voiceRate} onChange={e=>setPremium(p=>({...p,voiceRate:Number(e.currentTarget.value)}))} style={{"--volume-progress":`${((premium.voiceRate-0.7)/0.7)*100}%`} as React.CSSProperties} />
+                      </div>
+                      <div style={{background:"rgba(127,255,212,0.04)",border:"1px solid rgba(127,255,212,0.1)",borderRadius:12,padding:12}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,marginBottom:10}}>
+                          <div><p style={{...labelStyle,marginBottom:1}}>Custom Phase Pattern</p><p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:12,color:"rgba(232,244,240,0.42)"}}>{premium.customPhases ? "Custom Flow is active for sessions" : "Use your own inhale, hold, exhale, and empty-hold timing"}</p></div>
+                          {premium.customPhases && <button className="breatheos-btn-ghost" style={{fontSize:12,padding:"6px 10px"}} onClick={clearCustomPhases}>Use Program</button>}
+                          {!hasPremiumFeature("customPhases") && <span style={{fontSize:16}}>🔒</span>}
+                        </div>
+                        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginBottom:10}}>
+                          {([["inhale","In"],["holdIn","Hold"],["exhale","Out"],["holdOut","Empty"]] as const).map(([key,label])=>(
+                            <div key={key}><label style={{...labelStyle,fontSize:9,letterSpacing:1.5}}>{label}</label><input className="breatheos-input" type="number" min={key==="inhale"||key==="exhale"?1:0} value={customPhaseDraft[key]} onChange={e=>setCustomPhaseDraft(d=>({...d,[key]:e.target.value}))} onWheel={e=>e.currentTarget.blur()} /></div>
+                          ))}
+                        </div>
+                        <motion.button whileHover={{scale:1.02}} whileTap={{scale:0.98}} className="breatheos-btn" style={{width:"100%",fontSize:13,padding:"10px",opacity:hasPremiumFeature("customPhases")?1:0.45}} onClick={saveCustomPhases}>Save Custom Flow</motion.button>
+                      </div>
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                        <div style={{background:"rgba(255,215,0,0.06)",border:"1px solid rgba(255,215,0,0.14)",borderRadius:10,padding:12,textAlign:"center",opacity:hasPremiumFeature("streakStats")?1:0.45}}><div style={{fontFamily:"'Playfair Display',serif",fontSize:24,color:"#ffd700"}}>{hasPremiumFeature("streakStats") ? streakStats.current : "🔒"}</div><div style={{fontFamily:"'Cormorant Garamond',serif",fontSize:11,color:"rgba(232,244,240,0.45)",letterSpacing:1.5,textTransform:"uppercase"}}>Current Streak</div></div>
+                        <div style={{background:"rgba(255,215,0,0.06)",border:"1px solid rgba(255,215,0,0.14)",borderRadius:10,padding:12,textAlign:"center",opacity:hasPremiumFeature("streakStats")?1:0.45}}><div style={{fontFamily:"'Playfair Display',serif",fontSize:24,color:"#ffd700"}}>{hasPremiumFeature("streakStats") ? streakStats.longest : "🔒"}</div><div style={{fontFamily:"'Cormorant Garamond',serif",fontSize:11,color:"rgba(232,244,240,0.45)",letterSpacing:1.5,textTransform:"uppercase"}}>Best Streak</div></div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                      {PREMIUM_PACKAGES.map(pkg => <button key={pkg.id} className="breatheos-btn-ghost" onClick={()=>{setCheckoutPackageId(pkg.id);setScreen("checkout");}} style={{fontSize:13}}>{pkg.name}</button>)}
+                    </div>
+                  )}
+                </motion.div>
+
+                <motion.div variants={fadeInUp} style={{...glassCard,marginBottom:16,opacity:hasPremiumFeature("savedSoundMixes")?1:0.55}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:12,marginBottom:10}}>
+                    <div>
+                      <label style={{...labelStyle,marginBottom:2}}>Saved Sound Mixes</label>
+                      <p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:12,color:"rgba(232,244,240,0.4)",lineHeight:1.5}}>Save the current session and sleep sound setup. Requires {getFeaturePlanName("savedSoundMixes")} or higher.</p>
+                    </div>
+                    {!hasPremiumFeature("savedSoundMixes") && <button className="breatheos-btn-ghost" style={{fontSize:12,padding:"7px 10px"}} onClick={()=>setScreen("premium")}>Locked</button>}
+                  </div>
+                  <div style={{display:"grid",gridTemplateColumns:isDesktop?"minmax(0,1fr) auto":"1fr",gap:8,marginBottom:10}}>
+                    <input className="breatheos-input" disabled={!hasPremiumFeature("savedSoundMixes")} value={soundMixName} onChange={e=>setSoundMixName(e.target.value)} placeholder="Mix name" />
+                    <motion.button whileHover={{scale:hasPremiumFeature("savedSoundMixes")?1.02:1}} whileTap={{scale:hasPremiumFeature("savedSoundMixes")?0.98:1}} className="breatheos-btn" style={{fontSize:13,padding:"10px 14px",opacity:hasPremiumFeature("savedSoundMixes")?1:0.45}} onClick={saveSoundMix}>Save Mix</motion.button>
+                  </div>
+                  <div style={{display:"grid",gap:8}}>
+                    {savedSoundMixes.length === 0 ? (
+                      <p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:12,color:"rgba(232,244,240,0.35)"}}>No saved mixes yet.</p>
+                    ) : savedSoundMixes.map(mix => (
+                      <div key={mix.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,background:"rgba(127,255,212,0.04)",border:"1px solid rgba(127,255,212,0.1)",borderRadius:10,padding:"9px 10px"}}>
+                        <div>
+                          <p style={{fontFamily:"'Playfair Display',serif",fontSize:14,color:"#e8f4f0",marginBottom:2}}>{mix.name}</p>
+                          <p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:11,color:"rgba(232,244,240,0.38)"}}>{mix.sessionSoundIds.length} session sounds - {mix.sleepSoundIds.length} sleep sounds</p>
+                        </div>
+                        <div style={{display:"flex",gap:6}}>
+                          <button className="breatheos-btn-ghost" style={{fontSize:12,padding:"6px 10px"}} onClick={()=>applySoundMix(mix)}>Apply</button>
+                          <button className="breatheos-btn-ghost" style={{fontSize:12,padding:"6px 10px",color:"rgba(248,113,113,0.75)"}} onClick={()=>setSavedSoundMixes(prev=>prev.filter(item=>item.id!==mix.id))}>Delete</button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </motion.div>
+
+                <motion.div variants={fadeInUp} style={{...glassCard,marginBottom:16,opacity:hasPremiumFeature("savedRoutines")?1:0.55}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:12,marginBottom:10}}>
+                    <div>
+                      <label style={{...labelStyle,marginBottom:2}}>Saved Routines</label>
+                      <p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:12,color:"rgba(232,244,240,0.4)",lineHeight:1.5}}>Store multiple custom phase patterns. Requires {getFeaturePlanName("savedRoutines")} or higher.</p>
+                    </div>
+                    {!hasPremiumFeature("savedRoutines") && <button className="breatheos-btn-ghost" style={{fontSize:12,padding:"7px 10px"}} onClick={()=>setScreen("premium")}>Locked</button>}
+                  </div>
+                  <div style={{display:"grid",gridTemplateColumns:isDesktop?"minmax(0,1fr) auto":"1fr",gap:8,marginBottom:10}}>
+                    <input className="breatheos-input" disabled={!hasPremiumFeature("savedRoutines")} value={routineName} onChange={e=>setRoutineName(e.target.value)} placeholder="Routine name" />
+                    <motion.button whileHover={{scale:hasPremiumFeature("savedRoutines")?1.02:1}} whileTap={{scale:hasPremiumFeature("savedRoutines")?0.98:1}} className="breatheos-btn" style={{fontSize:13,padding:"10px 14px",opacity:hasPremiumFeature("savedRoutines")?1:0.45}} onClick={saveRoutine}>Save Routine</motion.button>
+                  </div>
+                  <div style={{display:"grid",gap:8}}>
+                    {savedRoutines.length === 0 ? (
+                      <p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:12,color:"rgba(232,244,240,0.35)"}}>No saved routines yet.</p>
+                    ) : savedRoutines.map(routine => (
+                      <div key={routine.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,background:"rgba(255,215,0,0.05)",border:"1px solid rgba(255,215,0,0.12)",borderRadius:10,padding:"9px 10px"}}>
+                        <div>
+                          <p style={{fontFamily:"'Playfair Display',serif",fontSize:14,color:"#e8f4f0",marginBottom:2}}>{routine.name}</p>
+                          <p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:11,color:"rgba(232,244,240,0.38)"}}>In {routine.phases.inhale}s - hold {routine.phases.holdIn}s - out {routine.phases.exhale}s - empty {routine.phases.holdOut}s</p>
+                        </div>
+                        <div style={{display:"flex",gap:6}}>
+                          <button className="breatheos-btn-ghost" style={{fontSize:12,padding:"6px 10px"}} onClick={()=>applyRoutine(routine)}>Apply</button>
+                          <button className="breatheos-btn-ghost" style={{fontSize:12,padding:"6px 10px",color:"rgba(248,113,113,0.75)"}} onClick={()=>setSavedRoutines(prev=>prev.filter(item=>item.id!==routine.id))}>Delete</button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </motion.div>
+
+                <motion.div variants={fadeInUp} style={{...glassCard,marginBottom:16,opacity:hasPremiumFeature("trainingProfiles")?1:0.55}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:12,marginBottom:10}}>
+                    <div>
+                      <label style={{...labelStyle,marginBottom:2}}>Training Profiles</label>
+                      <p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:12,color:"rgba(232,244,240,0.4)",lineHeight:1.5}}>Save separate health and goal profiles. Requires {getFeaturePlanName("trainingProfiles")} or higher.</p>
+                    </div>
+                    {!hasPremiumFeature("trainingProfiles") && <button className="breatheos-btn-ghost" style={{fontSize:12,padding:"7px 10px"}} onClick={()=>setScreen("premium")}>Locked</button>}
+                  </div>
+                  <div style={{display:"grid",gridTemplateColumns:isDesktop?"minmax(0,1fr) auto":"1fr",gap:8,marginBottom:10}}>
+                    <input className="breatheos-input" disabled={!hasPremiumFeature("trainingProfiles")} value={trainingProfileName} onChange={e=>setTrainingProfileName(e.target.value)} placeholder="Profile name" />
+                    <motion.button whileHover={{scale:hasPremiumFeature("trainingProfiles")?1.02:1}} whileTap={{scale:hasPremiumFeature("trainingProfiles")?0.98:1}} className="breatheos-btn" style={{fontSize:13,padding:"10px 14px",opacity:hasPremiumFeature("trainingProfiles")?1:0.45}} onClick={saveTrainingProfile}>Save Profile</motion.button>
+                  </div>
+                  <div style={{display:"grid",gap:8}}>
+                    {trainingProfiles.length === 0 ? (
+                      <p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:12,color:"rgba(232,244,240,0.35)"}}>No saved training profiles yet.</p>
+                    ) : trainingProfiles.map(item => (
+                      <div key={item.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,background:"rgba(127,255,212,0.04)",border:"1px solid rgba(127,255,212,0.1)",borderRadius:10,padding:"9px 10px"}}>
+                        <div>
+                          <p style={{fontFamily:"'Playfair Display',serif",fontSize:14,color:"#e8f4f0",marginBottom:2}}>{item.name}</p>
+                          <p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:11,color:"rgba(232,244,240,0.38)"}}>{GOAL_OPTIONS.find(option=>option.id===item.goal)?.label ?? item.goal}</p>
+                        </div>
+                        <div style={{display:"flex",gap:6}}>
+                          <button className="breatheos-btn-ghost" style={{fontSize:12,padding:"6px 10px"}} onClick={()=>applyTrainingProfile(item)}>Apply</button>
+                          <button className="breatheos-btn-ghost" style={{fontSize:12,padding:"6px 10px",color:"rgba(248,113,113,0.75)"}} onClick={()=>setTrainingProfiles(prev=>prev.filter(profileItem=>profileItem.id!==item.id))}>Delete</button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </motion.div>
+
                 <motion.div variants={fadeInUp} style={{...glassCard,marginBottom:16}}>
                   <label style={labelStyle}>Breathing Pace</label>
                   <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
@@ -1871,7 +2614,7 @@ export default function BreatheOS() {
 
                 <motion.div variants={fadeInUp} style={{...glassCard,marginBottom:16}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,marginBottom:10}}>
-                    <div><label style={{...labelStyle,marginBottom:2}}>Session Sounds</label><p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:12,color:"rgba(232,244,240,0.4)"}}>{sessionSelectedSounds.length} selected · auto-rotate {sessionSoundAutoRotate?"on":"off"}</p></div>
+                    <div><label style={{...labelStyle,marginBottom:2}}>Session Sounds</label><p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:12,color:"rgba(232,244,240,0.4)"}}>{sessionSelectedSounds.length} selected · auto-rotate {sessionSoundAutoRotate?"on":"off"}{hasPremiumFeature("unlimitedSounds") ? " · unlimited" : ` · free limit ${FREE_SESSION_SOUND_LIMIT}`}</p></div>
                     <div style={{display:"flex",gap:8,alignItems:"center"}}><Switch checked={sessionSoundAutoRotate} onCheckedChange={setSessionSoundAutoRotate} /><button className="breatheos-btn-ghost" style={{fontSize:12,padding:"6px 10px"}} onClick={()=>{setSoundSearchTarget("session");setSoundSearchOpen(true);}}>+ Add</button></div>
                   </div>
                   <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
@@ -1924,6 +2667,54 @@ export default function BreatheOS() {
                   </div>
                   <h2 style={{fontFamily:"'Playfair Display',serif",fontSize:30,color:"#7fffd4",marginBottom:6}}>Breathe Together</h2>
                   <p style={{fontFamily:"'Cormorant Garamond',serif",color:"rgba(232,244,240,0.45)",fontSize:14,lineHeight:1.6}}>Sync your breathing session with another person in real time. Share a room ID and breathe together.</p>
+                </motion.div>
+
+                <motion.div variants={fadeInUp} style={{...glassCard,marginBottom:16}}>
+                  <p style={labelStyle}>Shared Session Access</p>
+                  <div style={{display:"grid",gap:10}}>
+                    <div style={{display:"flex",gap:10,alignItems:"flex-start",background:"rgba(127,255,212,0.04)",border:"1px solid rgba(127,255,212,0.1)",borderRadius:10,padding:"10px 12px"}}>
+                      <span style={{color:"#7fffd4",fontSize:15}}>✓</span>
+                      <div>
+                        <p style={{fontFamily:"'Playfair Display',serif",fontSize:15,color:"#e8f4f0",marginBottom:2}}>Free Rooms</p>
+                        <p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:12,color:"rgba(232,244,240,0.42)",lineHeight:1.5}}>Everyone can create, join, copy, and share a Breathe Together room.</p>
+                      </div>
+                    </div>
+                    <div style={{display:"flex",gap:10,alignItems:"flex-start",background:hasPremiumFeature("togetherGuidance")?"rgba(255,215,0,0.06)":"rgba(127,255,212,0.03)",border:`1px solid ${hasPremiumFeature("togetherGuidance")?"rgba(255,215,0,0.16)":"rgba(127,255,212,0.08)"}`,borderRadius:10,padding:"10px 12px",opacity:hasPremiumFeature("togetherGuidance")?1:0.62}}>
+                      <span style={{fontSize:15,color:hasPremiumFeature("togetherGuidance")?"#ffd700":"rgba(232,244,240,0.35)"}}>{hasPremiumFeature("togetherGuidance") ? "✓" : "🔒"}</span>
+                      <div style={{flex:1}}>
+                        <p style={{fontFamily:"'Playfair Display',serif",fontSize:15,color:hasPremiumFeature("togetherGuidance")?"#ffd700":"rgba(232,244,240,0.72)",marginBottom:2}}>Coach Shared Guidance</p>
+                        <p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:12,color:"rgba(232,244,240,0.42)",lineHeight:1.5,marginBottom:8}}>Voice and haptic cues during shared sessions. Requires {getFeaturePlanName("togetherGuidance")} or higher.</p>
+                        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
+                            <Label style={{...labelStyle,marginBottom:0,fontSize:9,letterSpacing:1.5}}>Voice</Label>
+                            <Switch checked={premium.voiceOn && hasPremiumFeature("togetherGuidance")} disabled={!hasPremiumFeature("togetherGuidance")} onCheckedChange={v=>setPremium(p=>({...p,voiceOn:v}))} />
+                          </div>
+                          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
+                            <Label style={{...labelStyle,marginBottom:0,fontSize:9,letterSpacing:1.5}}>Haptics</Label>
+                            <Switch checked={premium.hapticsOn && hasPremiumFeature("togetherGuidance")} disabled={!hasPremiumFeature("togetherGuidance")} onCheckedChange={v=>setPremium(p=>({...p,hapticsOn:v}))} />
+                          </div>
+                        </div>
+                      </div>
+                      {!hasPremiumFeature("togetherGuidance") && <button className="breatheos-btn-ghost" style={{fontSize:12,padding:"6px 10px",whiteSpace:"nowrap"}} onClick={()=>setScreen("premium")}>Upgrade</button>}
+                    </div>
+                    <div style={{display:"flex",gap:10,alignItems:"flex-start",background:hasPremiumFeature("sharedRoutines")?"rgba(255,215,0,0.06)":"rgba(127,255,212,0.03)",border:`1px solid ${hasPremiumFeature("sharedRoutines")?"rgba(255,215,0,0.16)":"rgba(127,255,212,0.08)"}`,borderRadius:10,padding:"10px 12px",opacity:hasPremiumFeature("sharedRoutines")?1:0.62}}>
+                      <span style={{fontSize:15,color:hasPremiumFeature("sharedRoutines")?"#ffd700":"rgba(232,244,240,0.35)"}}>{hasPremiumFeature("sharedRoutines") ? "✓" : "🔒"}</span>
+                      <div style={{flex:1}}>
+                        <p style={{fontFamily:"'Playfair Display',serif",fontSize:15,color:hasPremiumFeature("sharedRoutines")?"#ffd700":"rgba(232,244,240,0.72)",marginBottom:2}}>Studio Shared Routines</p>
+                        <p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:12,color:"rgba(232,244,240,0.42)",lineHeight:1.5,marginBottom:8}}>Apply a saved Studio breathing routine before starting together. Requires {getFeaturePlanName("sharedRoutines")}.</p>
+                        {hasPremiumFeature("sharedRoutines") && (
+                          <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                            {savedRoutines.length === 0 ? (
+                              <span style={{fontFamily:"'Cormorant Garamond',serif",fontSize:12,color:"rgba(232,244,240,0.35)"}}>No routines saved yet.</span>
+                            ) : savedRoutines.slice(0,4).map(routine => (
+                              <button key={routine.id} className="breatheos-btn-ghost" style={{fontSize:11,padding:"5px 9px"}} onClick={()=>applyRoutine(routine)}>{routine.name}</button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                      {!hasPremiumFeature("sharedRoutines") && <button className="breatheos-btn-ghost" style={{fontSize:12,padding:"6px 10px",whiteSpace:"nowrap"}} onClick={()=>setScreen("premium")}>Upgrade</button>}
+                    </div>
+                  </div>
                 </motion.div>
 
                 {!togetherConnected ? (
@@ -1995,6 +2786,16 @@ export default function BreatheOS() {
                             <div><p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:14,color:"rgba(232,244,240,0.8)"}}>{peer.userId}</p><p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:12,color:peerCfg.color}}>{peerCfg.label}</p></div>
                           </div>);
                         })}
+                        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginTop:12}}>
+                          <div style={{background:"rgba(127,255,212,0.04)",border:"1px solid rgba(127,255,212,0.1)",borderRadius:10,padding:10,opacity:hasPremiumFeature("togetherGuidance")?1:0.55}}>
+                            <p style={{...labelStyle,fontSize:9,letterSpacing:1.5,marginBottom:2}}>Coach Cues</p>
+                            <p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:12,color:"rgba(232,244,240,0.45)"}}>{hasPremiumFeature("togetherGuidance") ? `${premium.voiceOn ? "Voice" : "Voice off"} / ${premium.hapticsOn ? "haptics" : "haptics off"}` : "Locked"}</p>
+                          </div>
+                          <div style={{background:"rgba(127,255,212,0.04)",border:"1px solid rgba(127,255,212,0.1)",borderRadius:10,padding:10,opacity:hasPremiumFeature("sharedRoutines")?1:0.55}}>
+                            <p style={{...labelStyle,fontSize:9,letterSpacing:1.5,marginBottom:2}}>Studio Routine</p>
+                            <p style={{fontFamily:"'Cormorant Garamond',serif",fontSize:12,color:"rgba(232,244,240,0.45)"}}>{hasPremiumFeature("sharedRoutines") ? activeProgram.name : "Locked"}</p>
+                          </div>
+                        </div>
                         <motion.button whileHover={{scale:1.02}} whileTap={{scale:0.98}} className="breatheos-btn" style={{width:"100%",marginTop:16}} onClick={startSession}>▶ Start Together Session</motion.button>
                       </div>
                     )}
