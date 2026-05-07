@@ -28,7 +28,6 @@ interface WeekMilestone {
 
 interface BpChartProps {
   bpLog: BpEntry[];
-  trainingDay: number;
   rec: {
     weeks: WeekMilestone[];
     maxReduction: number;
@@ -64,7 +63,7 @@ const CustomTooltip = ({ active, payload, label }: { active?: boolean; payload?:
   return null;
 };
 
-export default function BpChart({ bpLog, trainingDay, rec }: BpChartProps) {
+export default function BpChart({ bpLog, rec }: BpChartProps) {
   if (bpLog.length === 0) return null;
 
   // Build actual data points
@@ -79,10 +78,6 @@ export default function BpChart({ bpLog, trainingDay, rec }: BpChartProps) {
   const projectedData: Array<{ day: string; dayNum: number; estS: number | null; estD: number | null }> = [];
   if (rec && bpLog.length > 0) {
     const lastDay = bpLog[bpLog.length - 1].day;
-    const maxProjDay = Math.max(
-      trainingDay + (rec.weeks[rec.weeks.length - 1]?.week * 7 || 84),
-      84
-    );
 
     // Add starting point
     projectedData.push({

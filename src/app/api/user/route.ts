@@ -2,6 +2,7 @@ import { getServerSession } from "next-auth";
 import { NextResponse } from "next/server";
 import { authOptions } from "@/lib/auth";
 import { db } from "@/lib/db";
+import { getAuthoritativeSubscription } from "@/lib/supabase-subscriptions";
 
 export async function GET() {
   const session = await getServerSession(authOptions);
@@ -17,7 +18,13 @@ export async function GET() {
     orderBy: { createdAt: "asc" },
   });
 
-  return NextResponse.json({ profile, bpLogs, breathSessions });
+  const subscription = await getAuthoritativeSubscription(session.user.id);
+  const mergedProfile = profile ? { ...profile, ...subscription } : {
+    userId: session.user.id,
+    ...subscription,
+  };
+
+  return NextResponse.json({ profile: mergedProfile, bpLogs, breathSessions });
 }
 
 export async function PUT(req: Request) {
@@ -28,10 +35,43 @@ export async function PUT(req: Request) {
   const { profile, bpLogs, breathSessions } = body;
 
   if (profile) {
+    const allowedProfileFields = [
+      "age",
+      "gender",
+      "weight",
+      "systolic",
+      "diastolic",
+      "goal",
+      "trainingDay",
+      "soundOn",
+      "sessionSoundIds",
+      "sessionSoundAutoRotate",
+      "countCadenceMultiplier",
+      "sleepDuration",
+      "sleepVolume",
+      "sleepSoundIds",
+      "remindersOn",
+      "safetyConsentAccepted",
+      "guardianConsentAcknowledged",
+      "hapticsOn",
+      "voiceOn",
+      "voiceRate",
+      "streakCount",
+      "longestStreak",
+      "lastStreakDate",
+      "customPhases",
+      "profileName",
+    ] as const;
+    const profileData = Object.fromEntries(
+      allowedProfileFields
+        .filter(field => Object.prototype.hasOwnProperty.call(profile, field))
+        .map(field => [field, profile[field]])
+    );
+
     await db.userProfile.upsert({
       where: { userId: session.user.id },
-      update: { ...profile },
-      create: { userId: session.user.id, ...profile },
+      update: profileData,
+      create: { userId: session.user.id, ...profileData },
     });
   }
 

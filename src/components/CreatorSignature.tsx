@@ -31,7 +31,7 @@ export default function CreatorSignature({ variant = "badge", projectName }: Pro
       "background:#0a1628;color:rgba(127,255,212,0.6);padding:4px 8px;font-family:monospace;font-size:12px;",
       "color:rgba(127,255,212,0.4);font-family:monospace;font-size:11px;padding-left:4px;"
     );
-  }, []);
+  }, [projectName]);
 
   if (variant === "console") return null;
 
@@ -61,7 +61,7 @@ export default function CreatorSignature({ variant = "badge", projectName }: Pro
       title={`${CREATOR.name} · ${CREATOR.alias} — ${CREATOR.role}`}
       style={{
         position: "fixed",
-        bottom: "max(16px, env(safe-area-inset-bottom, 16px))",
+        bottom: "max(88px, calc(env(safe-area-inset-bottom, 0px) + 88px))",
         right: 16,
         zIndex: 999,
         display: "flex",
